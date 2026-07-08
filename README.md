@@ -41,3 +41,12 @@ Two chapters of my chain of pain:
 
 **Composition** = stock + fmguard (lock-BT) + child-shotgun (boot-sound)
 **Next** = port to the real car 911/9x1
+
+---
+
+## Acknowledgments
+
+Huge thanks to the following references — they gave this whole effort a solid foundation and direction:
+
+- **[dspl1236/PCM-Forge](https://github.com/dspl1236/PCM-Forge)** — the PCM-Forge project and its reverse-engineering groundwork.
+- **[Rennlist — "PCM3.1 reboot problem, repair attempt"](https://rennlist.com/forums/991/1484228-pcm3-1-reboot-problem-repair-attempt.html)** — the community thread on PCM3.1 reboot/repair.

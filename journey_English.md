@@ -293,3 +293,12 @@ Bundle = `copie_scr.sh` (the trigger, XOR-encoded, seed 0x001BE3AC) + `run.sh` (
 - `emulator-lab/bin/{inflate,deflate}_ifs_lzo.py`, `patch_decomp_ifs_file.py` — IFS pipeline
 - `firmware-cache/patch-lab/chn-clean-MOPF/PCM3_IFS1_MOPF.CHN.clean.ifs` — clean final firmware (cksum 4237630296)
 - `firmware-cache/usb-builds/flash_clean_bt_fix/` — USB autorun bundle
+
+---
+
+## Acknowledgments
+
+Huge thanks to the following references — they gave this whole effort a solid foundation and direction:
+
+- **[dspl1236/PCM-Forge](https://github.com/dspl1236/PCM-Forge)** — the PCM-Forge project and its reverse-engineering groundwork.
+- **[Rennlist — "PCM3.1 reboot problem, repair attempt"](https://rennlist.com/forums/991/1484228-pcm3-1-reboot-problem-repair-attempt.html)** — the community thread on PCM3.1 reboot/repair.

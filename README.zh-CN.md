@@ -41,3 +41,12 @@
 
 **组成** = stock + fmguard(锁BT)+ child-shotgun(开机出声)
 **下一步** = 移植到真车 911/9x1
+
+---
+
+## 致谢
+
+特别感谢以下参考——是它们让整个开发有了好的基础和思路:
+
+- **[dspl1236/PCM-Forge](https://github.com/dspl1236/PCM-Forge)** —— PCM-Forge 项目及其逆向工程的奠基工作。
+- **[Rennlist —— "PCM3.1 reboot problem, repair attempt"](https://rennlist.com/forums/991/1484228-pcm3-1-reboot-problem-repair-attempt.html)** —— PCM3.1 重启/维修的社区讨论帖。
