@@ -9,3 +9,12 @@
 *~
 .vscode/
 .idea/
+
+# Firmware binaries — modified proprietary Porsche firmware, do NOT commit.
+# Build your own from your own dump using code/ .
+*.ifs
+*.decomp
+*.bin
+*.as
+PCM3Root*
+PCM3_IFS*

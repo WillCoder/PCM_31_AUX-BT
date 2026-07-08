@@ -33,11 +33,12 @@ Two chapters of my chain of pain:
 
 ## Deliverables
 
-| | Path |
+| | Location |
 |---|---|
-| Clean firmware (cksum 4237630296) | `firmware-cache/patch-lab/chn-clean-MOPF/PCM3_IFS1_MOPF.CHN.clean.ifs` |
-| USB autorun bundle | `firmware-cache/usb-builds/flash_clean_bt_fix/` |
-| Solution assembler | `dev/build_shotgun_child.py` |
+| **Code (tools + scripts)** | [`code/`](code/) — solution assembler, sh4emu, IFS pipeline, preflight, autorun scripts |
+| The solution | [`code/build_shotgun_child.py`](code/build_shotgun_child.py) |
+| Preflight gate | [`code/verify_ifs_flashable.py`](code/verify_ifs_flashable.py) |
+| Clean firmware (cksum 4237630296) | **not included** — modified proprietary firmware; build your own from your dump with the tools in `code/` |
 
 **Composition** = stock + fmguard (lock-BT) + child-shotgun (boot-sound)
 **Next** = port to the real car 911/9x1

@@ -33,11 +33,12 @@
 
 ## 交付物
 
-| | 路径 |
+| | 位置 |
 |---|---|
-| 干净固件(cksum 4237630296) | `firmware-cache/patch-lab/chn-clean-MOPF/PCM3_IFS1_MOPF.CHN.clean.ifs` |
-| USB autorun 包 | `firmware-cache/usb-builds/flash_clean_bt_fix/` |
-| 解法汇编器 | `dev/build_shotgun_child.py` |
+| **代码(工具+脚本)** | [`code/`](code/) —— 解法汇编器、sh4emu、IFS 管线、预检门、autorun 脚本 |
+| 解法 | [`code/build_shotgun_child.py`](code/build_shotgun_child.py) |
+| 预检门 | [`code/verify_ifs_flashable.py`](code/verify_ifs_flashable.py) |
+| 干净固件(cksum 4237630296) | **不含**——改过的专有固件;用 `code/` 里的工具 + 你自己 dump 的固件自行构建 |
 
 **组成** = stock + fmguard(锁BT)+ child-shotgun(开机出声)
 **下一步** = 移植到真车 911/9x1
