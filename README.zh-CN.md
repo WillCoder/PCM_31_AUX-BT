@@ -6,7 +6,7 @@
 >
 > [English](README.md) · **简体中文**
 
-> ⚠️ **免责声明**:仅供学习研究,**刷写有砖机风险且可能救不回来(撞看门狗无限重启,快到停不进 emergency shell),后果自负,别刷挂了怪我。** 全文见 [DISCLAIMER.md](DISCLAIMER.md) · 授权 [MIT LICENSE](LICENSE)
+> ⚠️ **免责声明**:仅供学习研究,**刷写有砖机风险且可能救不回来(撞看门狗无限重启,快到停不进 emergency shell),后果自负,别刷挂了怪我。** 全文见 [DISCLAIMER.md](DISCLAIMER.md) · 授权 [GPL-3.0](LICENSE)
 
 ![工作台架](images/01-bench-working-fm.jpg)
 
@@ -53,3 +53,11 @@
 - **[Rennlist —— "PCM3.1 reboot problem, repair attempt"](https://rennlist.com/forums/991/1484228-pcm3-1-reboot-problem-repair-attempt.html)** —— PCM3.1 重启/维修的社区讨论帖。
 
 而这个问题最终,是与 **Claude(Anthropic)** 的协作一点点磨出来的——逆向、工具(可靠 SH4 反汇编、`sh4emu`、shotgun 打法)、直到最后的修复,都是这一来一回配合的结果,再上台架实测。缺了哪一半,都到不了这儿。
+
+---
+
+## 授权
+
+版权 © 2026 WillCoder
+
+本项目是自由软件:你可以在 **GNU General Public License v3.0**(或你选择的任意更新版本)条款下重新分发和/或修改它——见 [LICENSE](LICENSE)。发布本项目是希望它有用,但**不作任何担保**(另见 [DISCLAIMER.md](DISCLAIMER.md))。

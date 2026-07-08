@@ -6,7 +6,7 @@
 >
 > **English** · [简体中文](README.zh-CN.md)
 
-> ⚠️ **Disclaimer**: For study/research only. Flashing can brick your device **beyond recovery** (a watchdog endless-reboot, too fast to ever hold the emergency shell) — **use at your own risk; don't blame me.** 仅供学习研究,刷写有砖机风险且可能救不回来,后果自负。 Full text: [DISCLAIMER.md](DISCLAIMER.md) · License: [MIT](LICENSE)
+> ⚠️ **Disclaimer**: For study/research only. Flashing can brick your device **beyond recovery** (a watchdog endless-reboot, too fast to ever hold the emergency shell) — **use at your own risk; don't blame me.** 仅供学习研究,刷写有砖机风险且可能救不回来,后果自负。 Full text: [DISCLAIMER.md](DISCLAIMER.md) · License: [GPL-3.0](LICENSE)
 
 ![working bench](images/01-bench-working-fm.jpg)
 
@@ -53,3 +53,11 @@ Huge thanks to the following references — they gave this whole effort a solid 
 - **[Rennlist — "PCM3.1 reboot problem, repair attempt"](https://rennlist.com/forums/991/1484228-pcm3-1-reboot-problem-repair-attempt.html)** — the community thread on PCM3.1 reboot/repair.
 
 And this was ultimately solved through the collaboration with **Claude (Anthropic)** — the reverse engineering, the tooling (reliable SH4 disassembly, `sh4emu`, the shotgun approach) and the final fix all came out of the back-and-forth, then tested hands-on on the bench. It took both halves to get here.
+
+---
+
+## License
+
+Copyright (C) 2026 WillCoder
+
+This project is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License v3.0** (or, at your option, any later version) — see [LICENSE](LICENSE). It is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY** (see also [DISCLAIMER.md](DISCLAIMER.md)).
