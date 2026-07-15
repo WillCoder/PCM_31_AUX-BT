@@ -274,18 +274,101 @@ Bundle = `copie_scr.sh` (the trigger, XOR-encoded, seed 0x001BE3AC) + `run.sh` (
 5. **Verify every assumption on live hardware**: the hunt for a dead buffer eventually revealed .data is fully used at runtime; the buffer, whether fields are live, the CoW wall — all were discovered only by measuring, never by static assumption.
 6. **A recursion gate is mandatory**: the trigger function (entertSourceChanged) re-enters the instrumented vtable methods; without a one-shot gate it recurses infinitely and overflows the stack.
 7. **Always pass preflight before flashing** (both segments sum-to-zero) — this is the root cause of bricking; FAT USB writes occasionally corrupt, so always cksum-verify after `cp`.
+8. **Never hardcode a heap address.** `main` drifted across six boots. If a pointer must be found at runtime, *walk to it* from something the ABI hands you (the dispatch `this`), bounds-checking every hop before the dereference and validating the result. Scanning is not the alternative — on a hot path it is its own crash.
+9. **Hook upstream of the decision, not downstream of it.** The main-vtable retry handler looked ideal (`this == main` for free) and never fired, because on a reconnect the app never starts the attempt whose retries it handles. Ask *"is this called in the failing case?"* before *"is this convenient?"*.
+10. **Build on what is already proven; change one thing.** The final fix is the 2026-07-08 shotgun with exactly one line replaced. Every attempt to redesign around it (a `.bss` latch, a `+0x944` write, a different vtable) was slower and wrong — and the `+0x944` write actively broke it.
+11. **Keep an invariant that must hold, and check it.** "The lock lever must read `0x07`" is what exposed a bogus binary extraction that otherwise looked like a real variant difference.
+12. **The cheapest verification is the one the target performs itself.** Preflight-with-no-ARM let the *car* compute the payload checksum and confirm the image, before a single byte of flash was written.
 
 ---
 
-## 10. Next Step (the ultimate goal)
+## 10. The Last Mile: the shotgun's one flaw
 
-**Port to the real car, 911/9x1.** Bench = Panamera MOPF; the real car = 911 9x1, with different binary offsets. Use objdump to **re-locate** in the 9x1 binary: the main object address, the child vtable, entertSourceChanged, the gate-field offsets, and the dead-code zone; then apply the same fmguard + child-shotgun structure to rebuild a 9x1 IFS. A 9x1 lock-BT baseline (car9x1-fmboot) already exists as a reference.
+The child-vtable shotgun made sound on the bench — but it was not yet a *fix*, because of one line:
+
+```python
+prog += [('pc','Lmain',14)]      # r14 = main  (a HARDCODED address)
+```
+
+`main` is the `CPSoundPresCtrl` **heap singleton**, and it **drifts every boot**. Across the snapshots collected over this work it landed at six different addresses: `0x086ec01c`, `0x086ed694`, `0x086ed01c`, `0x086ef01c`, `0x0872d694`, `0x0872f01c`. The cave did have a `g_self` guard (`*(main) == 0x085c4c5c` → else no-op), which makes a *mapped but wrong* address harmless. The killer is the **unmapped** case: the guard itself has to read `*(main)` first, and that read faults → watchdog → the brick you cannot recover.
+
+The obvious alternative — scan the heap for the vtable fingerprint — was tried and was **worse**: the child-vtable methods are hot, and scanning 1.5 MB on every call overloaded the process and crashed it.
+
+### The wrong turn: hooking the main vtable
+
+If a hook on the *main* vtable is used, `this == r4 == main` arrives for free — no scan, no hardcode. That looked like the answer, and slot 2 (`0x082a7350`) was hooked and flashed. **It never fired on a reconnect.**
+
+The reason is structural: slot 2 is the async **retry handler**. It only runs when the app is *already attempting* BT audio. On a cold-boot reconnect the app decides FM/Default and never starts a BT attempt — so the hook sits **downstream of the very decision it is trying to change** and is never called. A hook that can only see the outcome cannot alter the outcome.
+
+### The `+0x944` fork (a trap worth documenting)
+
+While chasing this, a second discovery: `entertSourceChanged` (`0x082a717c`) **forks at `0x082a725c` on `main+0x944`**.
+
+- `+0x944 == 0` → the **durable** child-dispatch leg (`0x082a7290` → `FUN_08110298`). This is what a manual source tap takes. No retry machine, no teardown.
+- `+0x944 != 0` → a **fragile** TLAM connect+retry leg. Its async handler (main vtable slot 2) exhausts ~10 retries and, about 5 seconds later, calls `switchAudio(Default)` — which **tears the sound back down** (`t864` 40→3, `+0x86c` 7→10).
+
+An earlier attempt had *added* `main+0x944 = 1` to the cave on a wrong hypothesis — which forced the fragile leg and made the cave dismantle its own sound five seconds after producing it. Live snapshots settle it: `+0x944 == 0` in **both** the stuck and the playing state. The durable path needs nothing written to it. **The cave must not touch `+0x944`.**
+
+### The fix: derive `main` from `this`
+
+The one pointer that is always valid inside a child-vtable method is the dispatch `this` — the child object itself. So: don't guess `main`, **walk to it**. There is a structural reverse chain:
+
+```
+main = *(*(*(child + 0x38) + 0x08) + 0x70)
+```
+
+Every hop is range-checked `[0x08600000, 0x08f00000)` **before** dereferencing, and the final result is validated by the existing `g_self` vtable check. A half-built or mid-relink object graph therefore **bails cleanly and retries on the next call** rather than faulting. No scan, no hardcode, no drift, no second hook, no stash.
+
+The upper bound is `0x08f00000` and **not** `0x09000000` for a specific reason: a pointer that passes a `< 0x09000000` guard but sits near the top would make `pointer + offset` read *past* the mapped window and fault. Tightening the bound closes the only fault path an adversarial review could find — and costs nothing, since every real intermediate lives around `0x086e_____`.
+
+The chain is **structural, not a lucky coincidence**. It resolves in every snapshot available — bench playing / disconnected / AUX, the real `-2` connect-bug snapshot, the post-fix working state, and the **real car** — across all six `main` addresses.
+
+Everything else in the cave is byte-for-byte the proven 2026-07-08 shotgun: the same all-5 hook, the same `child+0x68 == -2 && main+0x94c == 1` gate, the same AUX→BT pair, the same `*(main+0x94c) = 0` one-shot. (A separate `.bss` latch was considered and **rejected**: it would fire only once per boot, whereas `+0x94c` is re-armed by the app on every reconnect — which is exactly what the use case needs.)
+
+### Proving it before flashing
+
+`validate_shotgun_child_chain.py` runs the cave inside `sh4emu` against the real `-2` connect-bug snapshot:
+
+- **T1** — dispatch with `this = child`: the cave **self-derives** `main`, passes the gates, calls `entertSourceChanged(main,24)` then `(main,40)`, clears `+0x94c`. No fault.
+- **T2** — dispatch with a non-child object: no fire, no fault.
+- **T3** — corrupt `*(child+0x38)` to an out-of-bounds pointer: the hop guard bails. No fault. (Without the guard, this dereference is exactly the brick.)
+
+---
+
+## 11. The Real Car (911/9x1) — done
+
+The old plan in this document read: *"the real car = 911 9x1, with different binary offsets; use objdump to re-locate everything."* **That assumption was wrong, and checking it was free:**
+
+> The 9x1 (car) `PCM3Root` and the MOPF (bench) `PCM3Root` are **byte-identical — 0 bytes differ.**
+
+The two IFS images differ in size (10,230,040 vs 10,450,488) only because of *other* variant files in the imagefs. `PCM3Root` itself is the same file. Dead zone, child vtable (all 5 slots + RTTI tags), main vtable, `entertSourceChanged`, the lock levers — all identical, each verified individually. So the car did not get a "port"; it got **the exact binary already proven on the bench**.
+
+### The trap that nearly hid this
+
+The first extraction attempt searched the car image for the bench `PCM3Root`'s first 16 bytes (the ELF header) and "found" it at `0x11000`. The result: 97% of bytes differed, vtable slots were garbage, `main` vtable slot 0 was zero. That looked like "a genuinely different variant" — a completely wrong conclusion.
+
+It was caught by a sanity check: the car baseline is the **proven lock-BT build**, so `0x2765e0` **must** read `0x07`. It read `0xe2`. The extraction was wrong, not the variant.
+
+**Every SH4 executable in the image starts with the same ELF header.** Locate `PCM3Root` through the **imagefs directory** (`mnt/ifs1/HBproject/PCM3Root`, at decomp `0x800000` in both images) — never by header search. *Have a fact that must be true, and check it: it is what tells you your tool lied to you.*
+
+### The flash (the car is unrecoverable — two steps)
+
+1. **Preflight, no ARM file on the USB** → `RESULT=PREFLIGHT_ONLY_NO_FLASH`. The car verifies version, variant and payload checksum **without writing flash**. The device's own QNX `cksum` returned `1098328085` — matching the value computed on the host, i.e. the car itself confirmed the image on the stick was intact.
+2. **Only then**, arm and flash: `IFSTYPE_OK=IFS_9X1` → `ARM_OK=1` → erase / program / **verify** `0x001C0000..0x00BB7717` → `flashit_rc=0`.
+
+The variant guard is inverted relative to the bench bundle: it **requires `IFS_9X1` and rejects `IFS_G1_E2`**, so a car USB can never brick the bench (and vice versa). Note the car's `run.sh` does **not** auto-remove the ARM file after flashing — disarm the stick manually, or the next insert re-flashes.
+
+### Result
+
+Park. Take the phone. Come back. Cold start. The phone reconnects — **the music returns on its own, on Bluetooth, with nothing to press.** Confirmed on the bench and on the real car.
 
 ---
 
 ## Appendix: Key Files
 
-- `dev/build_shotgun_child.py` — child-vtable shotgun assembler (the solution)
+- `dev/build_shotgun_child_chain.py` — **the solution**: child-vtable cave with the self-derived `main`
+- `dev/validate_shotgun_child_chain.py` — sh4emu proof against the real `-2` snapshot (T1 fires / T2 safe / T3 no fault)
+- `dev/build_shotgun_child.py` — its predecessor, kept as the reference baseline (hardcoded `main`)
 - `dev/build_shotgun.py` — main-vtable version (diagnostic)
 - `dev/build_auxkick_cave.py` — early AUX→BT cave template
 - `dev/sh4emu.py` / `dev/sh4_run_switch.py` — SH4 interpreter + source-switch harness
