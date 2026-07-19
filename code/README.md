@@ -7,7 +7,8 @@ Reverse-engineering and patch-building tools for the PCM_31_AUX-BT fixes.
 > 固件二进制不在此仓库(改过的保时捷专有固件)。用这些工具 + 你自己 dump 的固件自行构建;文中地址仅对特定台架固件有效,换机器要用 objdump 重新定位。
 
 ## The fix 解法
-- **`build_shotgun_child.py`** — **the solution**: the child-vtable shotgun assembler (hand-written SH4). Instruments the 5 child-vtable methods so that whichever fires at BT-connect triggers one AUX→BT.
+- **`build_shotgun_child_chain.py`** — **the final solution** (bench + real 9x1, cold-start verified). The child-vtable shotgun with the hardcoded `main` replaced by a runtime reverse-chain resolve `main = *(*(*(child+0x38)+0x08)+0x70)`, each hop bounds-guarded — no per-build address, and an unmapped intermediate bails cleanly instead of faulting.
+- `build_shotgun_child.py` — its predecessor / reference baseline: same cave, but a hardcoded `main` that drifts per boot (its one flaw). Kept for comparison.
 - `build_shotgun.py` — the main-vtable shotgun (diagnostic; imported by the child version).
 - `build_auxkick_cave.py` — early AUX→BT cave template.
 - `build_vtrace.py` — vtrace instrumentation (the tracer that hit the dead-buffer wall).
@@ -24,7 +25,9 @@ Reverse-engineering and patch-building tools for the PCM_31_AUX-BT fixes.
 - `deflate_ifs_lzo.py` — recompress, block-preserving + outer sum-to-zero (imports `inflate_ifs_lzo`).
 
 ## On-device / autorun
-- `sh4tools/mempoke.c` (+ `_start.S`, `start_stack.S`) — the `mp2` 1-byte writer for `/proc/<pid>/as` (build with a QNX SH4 toolchain; use `start_stack.S` so argc/argv are passed).
+- `sh4tools/mempoke.c` (+ `_start.S`, `start_stack.S`) — the `mp2` 1-byte reader/writer for `/proc/<pid>/as` (build with a QNX SH4 toolchain; use `start_stack.S` so argc/argv are passed).
+- `sh4tools/mempoke_fix.c` — range-scan variant: sweeps `[start,end)` for the unique 8-byte FM-index-store signature and flips the `mov #1` immediate `01→07` — the per-build-address-free `{0,10}→FM` reroute.
+- **`sh4tools/SERIAL_LOOP.md`** — the live-serial no-reflash iterate loop (57600 root shell + `mempoke`, seconds per turn). This is the primitive the whole fix was found with.
 - `autorun/run.sh` + `copie_scr.sh` — the USB autorun flasher (verifies cksum + ARM file, runs `flashit -v`, one-shot). The `.ifs` payload is **not** included.
 
 ## Reproduce
