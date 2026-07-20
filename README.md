@@ -52,6 +52,10 @@ One more trap worth knowing: `entertSourceChanged` forks on `main+0x944`. **Zero
 
 ## Part 3 · HW-layer overlay framework (2026-07-20)
 
+![volume OSD drawn on our own hardware layer, over the stock Jukebox page](images/06-overlay-volume-osd.jpg)
+
+*Our own volume OSD, drawn on an independent Carmine hardware layer, sitting on top of the untouched stock UI. Note that the stock page underneath keeps working normally — the progress bar advances, the clock ticks, the highlighted button stays highlighted. Nothing was flashed; the popup is pure runtime.*
+
 - **Goal**: draw our own popups (volume OSD, toasts, dialogs) on top of the stock UI, **without flashing anything**.
 - **Approach**: become a *second* gf client and take an idle Carmine hardware layer that `layermanager` never allocates. Each HW layer has its own scanout buffer → physically cannot collide with the stock UI's buffer or locks, so the ghosting/tearing of the old "share the stock surface" approach is gone at the hardware level.
 - **Status**: verified on the bench — full colour, anti-aliased text, true rounded-corner transparency, the bar tracking the volume knob live, auto-dismiss after 1.4 s. Zero flash writes.
