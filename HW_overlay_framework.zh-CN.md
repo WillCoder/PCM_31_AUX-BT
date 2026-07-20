@@ -95,7 +95,7 @@ gf_layer_set_surfaces → set_src_viewport → set_dst_viewport
 ## 3. 代码结构
 
 ```
-coexist-app/mvp/
+code/overlay/
   coexist_pop.c    弹窗引擎(本框架的主程序)
   ui_core.c        共享渲染核心 + ui.def 解析器 —— 与 Mac 预览器同一份
   ui_font.h        离线烤的字库(数字 + 比例字体, 含汉字)
@@ -133,6 +133,9 @@ surface 一次建 `UI_MAXW×UI_MAXH`(520×220),之后靠 **src viewport 裁剪 +
 
 拧旋钮实时跟手的数据来源。**原样沿用台架已验证的 `coexist_vol.c` v37,一个常量都没改。**
 
+> `coexist_vol.c` 是独立音量 OSD 的前身,**不在本仓库**——已由 `code/overlay/coexist_pop.c`
+> 取代。这里点名它只是为了记录这些常量的出处,以及它们没有被重新推导过。
+
 ```
 扫堆找 u32 == 0x085c76fc
   且 u32@(X+0x160) == X-0x218
@@ -165,23 +168,23 @@ src = u32@(P+0x74) ∈ {34,35}             → 铃声, 要丢掉
 
 ```bash
 # 编译(脚本会在检测到 error: 时中止, 不会留旧二进制骗你)
-bash dev/build_coexist_vol.sh coexist-app/mvp/coexist_pop.c coexist-app/mvp/coexist_pop
+bash code/overlay/build.sh code/overlay/coexist_pop.c code/overlay/coexist_pop
 
 # 推送(~97 秒 / 66KB), 自动比对 cksum
-python3 scratchpad/ser_push.py coexist-app/mvp/coexist_pop.stripped /tmp/coexist_pop 192
+python3 code/serial/ser_push.py code/overlay/coexist_pop.stripped /tmp/coexist_pop 192
 
 # 起进程 —— 三个重定向一个都不能少(见下)
-python3 scratchpad/ser2.py 'chmod 755 /tmp/coexist_pop; /tmp/coexist_pop </dev/null >/dev/null 2>/dev/null &'
+python3 code/serial/ser2.py 'chmod 755 /tmp/coexist_pop; /tmp/coexist_pop </dev/null >/dev/null 2>/dev/null &'
 
 # 拉日志
-python3 scratchpad/ser_pull.py /tmp/pop.txt scratchpad/pop.txt
+python3 code/serial/ser_pull.py /tmp/pop.txt pop.txt
 
 # 只改布局/配色: 推 348 字节即可, 不用重编重推
-python3 scratchpad/ser_push.py coexist-app/mvp/ui.def /tmp/ui.def 192
+python3 code/serial/ser_push.py code/overlay/ui.def /tmp/ui.def 192
 
 # 手动指定显示值(测渲染), 删掉文件回到活体音量
-python3 scratchpad/ser2.py 'echo 30 > /tmp/uival'
-python3 scratchpad/ser2.py 'rm -f /tmp/uival'
+python3 code/serial/ser2.py 'echo 30 > /tmp/uival'
+python3 code/serial/ser2.py 'rm -f /tmp/uival'
 ```
 
 ### 串口相关的坑
@@ -195,7 +198,7 @@ python3 scratchpad/ser2.py 'rm -f /tmp/uival'
 
 3. **台架 grep 不支持 `|` 或运算**(`grep -i "a\|b"` 静默返回空)。要么分开 grep,要么 `grep -E`。曾害我误判"图形栈没起来"。
 
-4. 台架**没有** `dd` / `cp` / `head` / `wc` / `touch`;`slay` 是交互式的(`-f` 也不管用),用 `scratchpad/ser_kill.py` 自动应答。
+4. 台架**没有** `dd` / `cp` / `head` / `wc` / `touch`;`slay` 是交互式的(`-f` 也不管用),用 `code/serial/ser_kill.py` 自动应答。
 
 ---
 
@@ -215,7 +218,7 @@ python3 scratchpad/ser2.py 'rm -f /tmp/uival'
 ## 7. 相关文件
 
 - 知识库详条:`memory/gf-independent-hwlayer-overlay-path-2026-07-19.md`
-- 芯片手册:`emulator-lab/docs/carmine-hw-manual.pdf`(MB86297A,L6 寄存器 p.430-432)
+- 芯片手册:MB86297A(MB86297A,L6 寄存器 p.430-432)
   ⚠️ **不要**用 `references/datasheets/MB86296S_CORAL-PA_spec.pdf` —— 那是只有 L0-L5 的前代
 - 反汇编配方(两个 .so 都无 section header,`objdump -d` 出空):
   ```bash

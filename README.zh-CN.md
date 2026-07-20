@@ -66,15 +66,19 @@ main = *(*(*(child + 0x38) + 0x08) + 0x70)
 
 | | 位置 |
 |---|---|
-| **代码(工具+脚本)** | [`code/`](code/) —— 解法汇编器、sh4emu、IFS 管线、预检门、autorun 脚本 |
+| **代码(工具+脚本)** | [`code/`](code/) —— 解法汇编器、sh4emu、IFS 管线、预检门、autorun 脚本、overlay 框架、串口工具链 |
 | **解法** | [`code/build_shotgun_child_chain.py`](code/build_shotgun_child_chain.py) —— child-vtable cave,`main` 自派生 |
 | 它的前身(作为参照基线保留) | [`code/build_shotgun_child.py`](code/build_shotgun_child.py) —— 同一个 cave,但 `main` 写死会漂 |
 | 离线证明 | [`code/validate_shotgun_child_chain.py`](code/validate_shotgun_child_chain.py) —— 在 `sh4emu` 里对真实 `-2` 连接bug快照跑 cave:自派生 `main`、开火、且(含故意喂坏指针)绝不 fault |
 | 预检门 | [`code/verify_ifs_flashable.py`](code/verify_ifs_flashable.py) |
 | 可刷固件 | **不含**——改过的专有固件;用 `code/` 里的工具 + 你自己 dump 的固件自行构建 |
+| **硬件图层 overlay**(Part 3,与 BT 修复相互独立) | [`code/overlay/`](code/overlay/) —— 引擎、渲染器、字库、构建脚本 · 详文 [`HW_overlay_framework.zh-CN.md`](HW_overlay_framework.zh-CN.md) |
+| 台架串口工具链 | [`code/serial/`](code/serial/) —— 57600 root shell 上推/拉/跑/杀,不用插 U 盘 · poke 循环见 [`code/sh4tools/SERIAL_LOOP.md`](code/sh4tools/SERIAL_LOOP.md) |
 
-**组成** = stock + fmguard(锁BT)+ child-chain cave(开机出声)
+**BT 修复** —— 组成 = stock + fmguard(锁BT)+ child-chain cave(开机出声);交付方式是**刷 IFS1**。
 **状态** = ✅ **台架** 与 **真车(911/9x1)** 双双实刷确认
+
+> 为什么必须刷,不能做成 runtime 补丁?`/proc/<pid>/as` 只写得进 RW 页,**写只读 code/rodata 会失败**(CoW 墙 —— journey 的 Dead end ③)。两个 cave 都在 RX 段,所以这硬件上**做不了运行时代码注入**。串口 poke 循环是**找到**修复的手段,刷 IFS1 才是**交付**它的手段。Part 3 的 overlay 是另一回事——独立的 runtime app,完全不涉及刷写。
 
 > 注:台架(MOPF / `IFS_G1_E2`)和真车(`IFS_9X1`)的 `PCM3Root` **二进制字节完全相同**,只有周围的 imagefs 不同。所以真车进的就是台架上验过的那一份。定位 `PCM3Root` 要走 **imagefs 目录**(`mnt/ifs1/HBproject/PCM3Root`),**别用 ELF 头去搜**——镜像里每个 SH4 可执行文件开头都一样,你一定会抽错文件。
 

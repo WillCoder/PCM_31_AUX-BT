@@ -66,15 +66,19 @@ One more trap worth knowing: `entertSourceChanged` forks on `main+0x944`. **Zero
 
 | | Location |
 |---|---|
-| **Code (tools + scripts)** | [`code/`](code/) — solution assembler, sh4emu, IFS pipeline, preflight, autorun scripts |
+| **Code (tools + scripts)** | [`code/`](code/) — solution assembler, sh4emu, IFS pipeline, preflight, autorun scripts, overlay framework, serial toolchain |
 | **The solution** | [`code/build_shotgun_child_chain.py`](code/build_shotgun_child_chain.py) — the child-vtable cave with the self-derived `main` |
 | Its predecessor (kept as the reference baseline) | [`code/build_shotgun_child.py`](code/build_shotgun_child.py) — same cave, but with the hardcoded `main` that drifts |
 | Offline proof | [`code/validate_shotgun_child_chain.py`](code/validate_shotgun_child_chain.py) — runs the cave in `sh4emu` against the real `-2` connect-bug snapshot: it self-derives `main`, fires, and never faults (incl. deliberately corrupted pointers) |
 | Preflight gate | [`code/verify_ifs_flashable.py`](code/verify_ifs_flashable.py) |
 | Flashable firmware | **not included** — modified proprietary firmware; build your own from your dump with the tools in `code/` |
+| **HW-layer overlay** (Part 3, independent of the BT fix) | [`code/overlay/`](code/overlay/) — engine, renderer, font, build script · write-up [`HW_overlay_framework.md`](HW_overlay_framework.md) |
+| Bench serial toolchain | [`code/serial/`](code/serial/) — push / pull / run / kill over the 57600 root shell, no USB stick · poke loop [`code/sh4tools/SERIAL_LOOP.md`](code/sh4tools/SERIAL_LOOP.md) |
 
-**Composition** = stock + fmguard (lock-BT) + child-chain cave (boot-sound)
+**The BT fix** — composition = stock + fmguard (lock-BT) + child-chain cave (boot-sound); delivered by **flashing IFS1**.
 **Status** = ✅ flashed and confirmed on the **bench** and on the **real car (911/9x1)**
+
+> Why flash, and not a runtime patch? `/proc/<pid>/as` writes reach RW pages only and **fail on read-only code/rodata** (the CoW wall — journey, Dead end ③). Both caves live in the RX segment, so runtime code injection is not possible on this hardware. The serial poke loop is how the fix was *found*; flashing IFS1 is how it *ships*. Part 3's overlay is a separate runtime app and involves no flash write at all.
 
 > Note: the bench (MOPF / `IFS_G1_E2`) and the car (`IFS_9X1`) ship **byte-identical `PCM3Root` binaries** — only the surrounding imagefs differs. So the car got the exact same proven binary. Locate `PCM3Root` through the **imagefs directory** (`mnt/ifs1/HBproject/PCM3Root`), never by searching for the ELF header — every SH4 executable in the image starts with the same bytes, and you *will* extract the wrong file.
 

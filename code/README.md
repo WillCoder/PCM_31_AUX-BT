@@ -30,5 +30,15 @@ Reverse-engineering and patch-building tools for the PCM_31_AUX-BT fixes.
 - **`sh4tools/SERIAL_LOOP.md`** — the live-serial no-reflash iterate loop (57600 root shell + `mempoke`, seconds per turn). This is the primitive the whole fix was found with.
 - `autorun/run.sh` + `copie_scr.sh` — the USB autorun flasher (verifies cksum + ARM file, runs `flashit -v`, one-shot). The `.ifs` payload is **not** included.
 
+## HW-layer overlay 弹窗框架
+Draw your own popups (volume OSD, toasts, dialogs) over the stock UI by taking an idle Carmine hardware layer — a separate runtime app, **no flash write involved**. Unrelated to the BT fix above.
+- [`overlay/`](overlay/) — `coexist_pop.c` (engine), `ui_core.c` (renderer + `ui.def` parser), `ui_font.h`, `ui.def`, `gf_defs.h`, `stub_libgf.c`, `build.sh`.
+- See [`overlay/README.md`](overlay/README.md) for the three traps that each cost a day, and [`HW_overlay_framework.md`](../HW_overlay_framework.md) for the full write-up.
+
+## Bench serial toolchain
+The 57600 root-shell development loop — push a binary, run it, pull the log, kill it, **without a USB stick and without reflashing**.
+- [`serial/`](serial/) — `ser_push.py` (chunked upload + cksum verify), `ser_pull.py`, `ser2.py` (run a command), `ser_kill.py` (answers `slay`'s interactive prompts).
+- The `/proc/<pid>/as` poke loop this pairs with: [`sh4tools/SERIAL_LOOP.md`](sh4tools/SERIAL_LOOP.md).
+
 ## Reproduce
 Read [journey_English.md](../journey_English.md) for how these fit together. Every cave is hand-assembled SH4 and validated in `sh4emu.py` before flashing; every flash passes `verify_ifs_flashable.py` first.

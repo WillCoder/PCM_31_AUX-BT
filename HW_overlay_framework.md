@@ -179,6 +179,10 @@ never requires recreating the surface.
 The data source that makes the bar track the knob. **Taken verbatim from `coexist_vol.c`
 v37, which was already proven on the bench — not one constant was changed.**
 
+> `coexist_vol.c` was the standalone volume-OSD predecessor; it is **not shipped in this
+> repo** — `code/overlay/coexist_pop.c` supersedes it. It is named here only to record
+> where these constants came from and that they were not re-derived.
+
 ```
 scan the heap for  u32 == 0x085c76fc
   and  u32@(X+0x160) == X-0x218
@@ -216,10 +220,10 @@ scan range `0x0866e200 – 0x08a00000`, 64 KB at a time.
 
 ```bash
 # Build (the script aborts on `error:` instead of leaving a stale binary to fool you)
-bash dev/build_coexist_vol.sh coexist-app/mvp/coexist_pop.c coexist-app/mvp/coexist_pop
+bash code/overlay/build.sh code/overlay/coexist_pop.c code/overlay/coexist_pop
 
 # Push (~97 s for 66 KB), verifies cksum automatically
-python3 code/serial/ser_push.py coexist-app/mvp/coexist_pop.stripped /tmp/coexist_pop 192
+python3 code/serial/ser_push.py code/overlay/coexist_pop.stripped /tmp/coexist_pop 192
 
 # Launch — all three redirections are mandatory (see below)
 python3 code/serial/ser2.py 'chmod 755 /tmp/coexist_pop; /tmp/coexist_pop </dev/null >/dev/null 2>/dev/null &'
@@ -228,7 +232,7 @@ python3 code/serial/ser2.py 'chmod 755 /tmp/coexist_pop; /tmp/coexist_pop </dev/
 python3 code/serial/ser_pull.py /tmp/pop.txt pop.txt
 
 # Layout/colour only: push 348 bytes, no recompile
-python3 code/serial/ser_push.py coexist-app/mvp/ui.def /tmp/ui.def 192
+python3 code/serial/ser_push.py code/overlay/ui.def /tmp/ui.def 192
 
 # Force a displayed value (to test rendering); delete the file to return to live volume
 python3 code/serial/ser2.py 'echo 30 > /tmp/uival'
