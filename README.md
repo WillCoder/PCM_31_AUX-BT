@@ -1,9 +1,9 @@
 # PCM_31_AUX-BT
 
-**Porsche PCM3.1 Bluetooth Audio Fix**
+**Porsche PCM3.1 — Bluetooth audio fix, and a modding toolkit built around it**
 
 > Porsche PCM3.1 (CHN) · QNX 6.3.x · SH-4A · 2026-07
-> **✅ Solved — flashed and confirmed on the MOPF bench *and* on the real car (911/9x1).**
+> **✅ Bluetooth fix solved — flashed and confirmed on the MOPF bench *and* on the real car (911/9x1).**
 >
 > **English** · [简体中文](README.zh-CN.md)
 
@@ -12,6 +12,21 @@
 ![working bench](images/01-bench-working-fm.jpg)
 
 > **The cost**: two bench units were **bricked and unrecoverable** earlier — a watchdog endless-reboot too fast to ever hold the emergency shell. That paid for the methodology (two-segment sum-zero preflight, plus knowing a "stable" brick is serial-recoverable but a "watchdog" brick is not); nothing has bricked since. See the "Prologue" in the journey doc.
+
+## What's in here
+
+| | What it does | Ships as | Status |
+|---|---|---|---|
+| **Bluetooth fix** (lock-BT + boot-sound) | Bluetooth stays selected across a cold start — **and it makes sound**, with nothing to press | **IFS1 flash** | ✅ bench + real car (911/9x1) |
+| **HW-layer overlay framework** | Draw your own popups (volume OSD, toasts, dialogs) on top of the untouched stock UI | runtime app, **no flash** | ✅ bench |
+| **Bench serial toolchain** | 57600 root-shell dev loop — push a binary, run it, pull the log, kill it; no USB stick, no reflash | dev tooling | ✅ |
+| **RE + build pipeline** | Reliable SH4 disassembly, `sh4emu` interpreter, IFS inflate/patch/deflate, pre-flash preflight gate | dev tooling | ✅ |
+
+**How something ships is the first thing to know about it.** A flash patch can brick the unit and is the only way to change stock code (see [why](#why-the-bluetooth-fix-ships-as-a-flash)); a runtime app cannot brick anything and disappears on reboot.
+
+---
+
+# The Bluetooth fix
 
 Two chapters of my chain of pain:
 - **① lock-BT** — playing Bluetooth, turn the car off; next trip it **always reverts to FM**, must manually re-select BT → fixed
@@ -48,39 +63,84 @@ One more trap worth knowing: `entertSourceChanged` forks on `main+0x944`. **Zero
 
 📄 **Full journey — two chapters, every dead end and why: [journey_English.md](journey_English.md)** · 中文全过程见 [全过程_中文.md](全过程_中文.md)
 
----
+## What ships
 
-## Part 3 · HW-layer overlay framework (2026-07-20)
-
-![volume OSD drawn on our own hardware layer, over the stock Jukebox page](images/06-overlay-volume-osd.jpg)
-
-*Our own volume OSD, drawn on an independent Carmine hardware layer, sitting on top of the untouched stock UI. Note that the stock page underneath keeps working normally — the progress bar advances, the clock ticks, the highlighted button stays highlighted. Nothing was flashed; the popup is pure runtime.*
-
-- **Goal**: draw our own popups (volume OSD, toasts, dialogs) on top of the stock UI, **without flashing anything**.
-- **Approach**: become a *second* gf client and take an idle Carmine hardware layer that `layermanager` never allocates. Each HW layer has its own scanout buffer → physically cannot collide with the stock UI's buffer or locks, so the ghosting/tearing of the old "share the stock surface" approach is gone at the hardware level.
-- **Status**: verified on the bench — full colour, anti-aliased text, true rounded-corner transparency, the bar tracking the volume knob live, auto-dismiss after 1.4 s. Zero flash writes.
-- **Three traps that each cost a day**: the driver **inverts layer numbers** (`hw = 7 − gf`, so use gf 5); the pixel format is **RGBA5551 despite the API reporting ARGB1555**; and **every `gf_layer_update` must be preceded by a full re-assert** or it deadlocks in `gdcServerCarmine` forever.
-- Code: [`code/overlay/`](code/overlay/) · Full write-up: [`HW_overlay_framework.md`](HW_overlay_framework.md) ([简体中文](HW_overlay_framework.zh-CN.md))
-
-## Deliverables
+**Composition** = stock `PCM3Root` + fmguard (lock-BT) + child-chain cave (boot-sound), delivered by **flashing IFS1**.
 
 | | Location |
 |---|---|
-| **Code (tools + scripts)** | [`code/`](code/) — solution assembler, sh4emu, IFS pipeline, preflight, autorun scripts, overlay framework, serial toolchain |
 | **The solution** | [`code/build_shotgun_child_chain.py`](code/build_shotgun_child_chain.py) — the child-vtable cave with the self-derived `main` |
 | Its predecessor (kept as the reference baseline) | [`code/build_shotgun_child.py`](code/build_shotgun_child.py) — same cave, but with the hardcoded `main` that drifts |
 | Offline proof | [`code/validate_shotgun_child_chain.py`](code/validate_shotgun_child_chain.py) — runs the cave in `sh4emu` against the real `-2` connect-bug snapshot: it self-derives `main`, fires, and never faults (incl. deliberately corrupted pointers) |
 | Preflight gate | [`code/verify_ifs_flashable.py`](code/verify_ifs_flashable.py) |
 | Flashable firmware | **not included** — modified proprietary firmware; build your own from your dump with the tools in `code/` |
-| **HW-layer overlay** (Part 3, independent of the BT fix) | [`code/overlay/`](code/overlay/) — engine, renderer, font, build script · write-up [`HW_overlay_framework.md`](HW_overlay_framework.md) |
-| Bench serial toolchain | [`code/serial/`](code/serial/) — push / pull / run / kill over the 57600 root shell, no USB stick · poke loop [`code/sh4tools/SERIAL_LOOP.md`](code/sh4tools/SERIAL_LOOP.md) |
 
-**The BT fix** — composition = stock + fmguard (lock-BT) + child-chain cave (boot-sound); delivered by **flashing IFS1**.
-**Status** = ✅ flashed and confirmed on the **bench** and on the **real car (911/9x1)**
+### Why the Bluetooth fix ships as a flash
 
-> Why flash, and not a runtime patch? `/proc/<pid>/as` writes reach RW pages only and **fail on read-only code/rodata** (the CoW wall — journey, Dead end ③). Both caves live in the RX segment, so runtime code injection is not possible on this hardware. The serial poke loop is how the fix was *found*; flashing IFS1 is how it *ships*. Part 3's overlay is a separate runtime app and involves no flash write at all.
+`/proc/<pid>/as` writes reach RW pages only and **fail on read-only code/rodata** — the CoW wall, proven on real hardware ([journey, Dead end ③](journey_English.md)). Both caves live in the RX segment, so **runtime code injection is not possible on this hardware**. The serial poke loop is how the fix was *found*; flashing IFS1 is how it *ships*.
 
 > Note: the bench (MOPF / `IFS_G1_E2`) and the car (`IFS_9X1`) ship **byte-identical `PCM3Root` binaries** — only the surrounding imagefs differs. So the car got the exact same proven binary. Locate `PCM3Root` through the **imagefs directory** (`mnt/ifs1/HBproject/PCM3Root`), never by searching for the ELF header — every SH4 executable in the image starts with the same bytes, and you *will* extract the wrong file.
+
+---
+
+# Runtime features
+
+Separate apps that run alongside the stock software. They **never write flash**, so they cannot brick anything and they vanish on reboot.
+
+## HW-layer overlay framework (2026-07-20)
+
+![volume OSD drawn on our own hardware layer, over the stock Jukebox page](images/06-overlay-volume-osd.jpg)
+
+*Our own volume OSD, drawn on an independent Carmine hardware layer, sitting on top of the untouched stock UI. Note that the stock page underneath keeps working normally — the progress bar advances, the clock ticks, the highlighted button stays highlighted. Nothing was flashed; the popup is pure runtime.*
+
+- **Goal**: draw our own popups (volume OSD, toasts, dialogs) on top of the stock UI, without flashing anything.
+- **Approach**: become a *second* gf client and take an idle Carmine hardware layer that `layermanager` never allocates. Each HW layer has its own scanout buffer → physically cannot collide with the stock UI's buffer or locks, so the ghosting/tearing of the old "share the stock surface" approach is gone at the hardware level.
+- **Status**: verified on the bench — full colour, anti-aliased text, true rounded-corner transparency, the bar tracking the volume knob live, auto-dismiss after 1.4 s.
+- **Three traps that each cost a day**: the driver **inverts layer numbers** (`hw = 7 − gf`, so use gf 5); the pixel format is **RGBA5551 despite the API reporting ARGB1555**; and **every `gf_layer_update` must be preceded by a full re-assert** or it deadlocks in `gdcServerCarmine` forever.
+- Code: [`code/overlay/`](code/overlay/) · Full write-up: [`HW_overlay_framework.md`](HW_overlay_framework.md) ([简体中文](HW_overlay_framework.zh-CN.md))
+
+---
+
+# Tooling
+
+## Bench serial toolchain
+
+The 57600 root-shell development loop — push a binary, run it, pull the log, kill it, **without a USB stick and without reflashing**. Layout-only changes push 348 bytes instead of a 66 KB binary.
+
+- [`code/serial/`](code/serial/) — `ser_push.py` (chunked upload + cksum verify), `ser_pull.py`, `ser2.py` (run a command), `ser_kill.py`.
+- [`code/sh4tools/SERIAL_LOOP.md`](code/sh4tools/SERIAL_LOOP.md) — the `/proc/<pid>/as` poke loop this pairs with, and **what it can and cannot reach**.
+
+## Reverse-engineering + build
+
+- [`code/`](code/) — cave assemblers, `sh4emu.py` (an SH4 interpreter that runs real `PCM3Root` functions against a memory snapshot), the IFS inflate/patch/deflate pipeline, and `verify_ifs_flashable.py` (the pre-flash gate the two bricked benches paid for).
+- Full index: [`code/README.md`](code/README.md).
+
+---
+
+## Repository layout
+
+```
+README.md / README.zh-CN.md        this index
+journey_English.md / 全过程_中文.md  the Bluetooth fix, full story + every dead end
+HW_overlay_framework.md (+.zh-CN)  the overlay framework write-up
+code/
+  build_*.py, sh4emu.py, ...       the Bluetooth fix: assemblers, emulator, IFS pipeline
+  overlay/                         HW-layer overlay framework
+  serial/                          bench serial toolchain
+  sh4tools/                        on-device C tools (mempoke) + SERIAL_LOOP.md
+  autorun/                         USB autorun flasher scripts
+images/                            bench photos and screenshots
+```
+
+## Adding a new feature
+
+The layout absorbs new work without renumbering anything:
+
+1. **Code** → its own `code/<feature>/` directory (like `overlay/` and `serial/`), with a short `README.md` inside covering the traps someone would otherwise rediscover the hard way.
+2. **Write-up** → `<Feature>.md` at the repo root, plus `<Feature>.zh-CN.md`. **English is the master, Chinese is the translation** — same convention as this README.
+3. **Index** → add one row to *What's in here*, and one `##` section under **Runtime features** (or under **The Bluetooth fix** style of its own top-level section, if it ships by flashing).
+4. **State how it ships** — runtime app or flash patch. That one fact sets the risk profile and is the first thing any reader needs.
+5. Keep the dead ends. The "what I tried and why it failed" sections are the most valuable part of these docs; a feature without them will cost the next person the same days it cost you.
 
 ---
 

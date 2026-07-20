@@ -1,9 +1,9 @@
 # PCM_31_AUX-BT
 
-**Porsche PCM3.1 蓝牙音频修复**
+**Porsche PCM3.1 —— 蓝牙音频修复,以及围绕它长出来的一套改机工具箱**
 
 > Porsche PCM3.1(CHN)· QNX 6.3.x · SH-4A · 2026-07
-> **✅ 已解决 —— MOPF 台架 与 真车(911/9x1)双双实刷确认。**
+> **✅ 蓝牙修复已解决 —— MOPF 台架 与 真车(911/9x1)双双实刷确认。**
 >
 > [English](README.md) · **简体中文**
 
@@ -12,6 +12,21 @@
 ![工作台架](images/01-bench-working-fm.jpg)
 
 > **代价**:之前**报废两台台架、救不回来**——撞看门狗、无限重启,快到停不进 emergency shell。这套方法论是那两台换来的:startup+imagefs 两段各 sum-zero 预检门,加上认清"稳定砖能串口救、看门狗砖救不了",之后再没砖过。详见全过程文档开篇"前情"。
+
+## 这个仓库里有什么
+
+| | 做什么 | 交付方式 | 状态 |
+|---|---|---|---|
+| **蓝牙修复**(锁BT + 开机出声) | 冷启动后蓝牙保持选中 —— **而且出声**,一个键都不用按 | **刷 IFS1** | ✅ 台架 + 真车(911/9x1) |
+| **硬件图层 overlay 框架** | 在完全没动过的原厂 UI 之上叠加自绘弹窗(音量 OSD、提示、对话框) | runtime app,**不刷写** | ✅ 台架 |
+| **台架串口工具链** | 57600 root shell 开发闭环 —— 推二进制、跑、拉日志、杀掉;不插 U 盘、不重刷 | 开发工具 | ✅ |
+| **逆向 + 构建管线** | 可靠 SH4 反汇编、`sh4emu` 解释器、IFS inflate/patch/deflate、刷前预检门 | 开发工具 | ✅ |
+
+**一个东西"怎么交付"是关于它最该先知道的事。** 刷写补丁能把机器变砖,而且是改原厂代码的唯一途径([为什么](#为什么蓝牙修复必须靠刷写));runtime app 砖不了机器,重启就没了。
+
+---
+
+# 蓝牙修复
 
 我这条痛点链的两章:
 - **① 锁BT** — 蓝牙放着歌熄火,下次上车**每次都回到 FM**,要手动切蓝牙 → 修复
@@ -48,39 +63,84 @@ main = *(*(*(child + 0x38) + 0x08) + 0x70)
 
 📄 **完整全过程(两章 · 含所有死路及原因):[全过程_中文.md](全过程_中文.md)** · English journey see [journey_English.md](journey_English.md)
 
----
+## 交付的是什么
 
-## Part 3 · 硬件独立图层弹窗框架(2026-07-20)
-
-![音量 OSD 画在我们自己的硬件图层上, 压在原厂 Jukebox 页之上](images/06-overlay-volume-osd.jpg)
-
-*我们自绘的音量 OSD,画在独立的 Carmine 硬件图层上,压在完全没动过的原厂 UI 之上。注意底下的原厂页面照常工作 —— 进度条在走、时钟在跳、选中的按钮仍然高亮。全程零刷写,弹窗纯运行时。*
-
-- **目标**:在原厂 UI 之上叠加自绘弹窗(音量 OSD、提示、对话框),**完全不刷 flash**。
-- **做法**:作为**第二个 gf 客户端**,抢一个 `layermanager` 从不分配的空闲 Carmine 硬件层。各硬件层有各自独立的 scanout 缓冲 → 物理上碰不到原厂 UI 的缓冲和锁,老方案"共享原厂 surface"导致的残影/撕裂在硬件层面消失。
-- **状态**:台架实证通过 —— 全彩、抗锯齿字体、真圆角透明、音量条跟着旋钮实时走、松手 1.4 秒自动收起。零刷写。
-- **三个各值一天的坑**:驱动把**层号反转**(`硬件层 = 7 − gf层`,所以要用 gf5);像素格式是 **RGBA5551 而不是 API 报的 ARGB1555**;以及**每次 `gf_layer_update` 前必须完整重申**,否则永久死锁在 `gdcServerCarmine`。
-- 代码:[`code/overlay/`](code/overlay/) · 详细文档:[`HW_overlay_framework.zh-CN.md`](HW_overlay_framework.zh-CN.md)([English](HW_overlay_framework.md))
-
-## 交付物
+**组成** = 原厂 `PCM3Root` + fmguard(锁BT)+ child-chain cave(开机出声),交付方式是**刷 IFS1**。
 
 | | 位置 |
 |---|---|
-| **代码(工具+脚本)** | [`code/`](code/) —— 解法汇编器、sh4emu、IFS 管线、预检门、autorun 脚本、overlay 框架、串口工具链 |
 | **解法** | [`code/build_shotgun_child_chain.py`](code/build_shotgun_child_chain.py) —— child-vtable cave,`main` 自派生 |
 | 它的前身(作为参照基线保留) | [`code/build_shotgun_child.py`](code/build_shotgun_child.py) —— 同一个 cave,但 `main` 写死会漂 |
 | 离线证明 | [`code/validate_shotgun_child_chain.py`](code/validate_shotgun_child_chain.py) —— 在 `sh4emu` 里对真实 `-2` 连接bug快照跑 cave:自派生 `main`、开火、且(含故意喂坏指针)绝不 fault |
 | 预检门 | [`code/verify_ifs_flashable.py`](code/verify_ifs_flashable.py) |
 | 可刷固件 | **不含**——改过的专有固件;用 `code/` 里的工具 + 你自己 dump 的固件自行构建 |
-| **硬件图层 overlay**(Part 3,与 BT 修复相互独立) | [`code/overlay/`](code/overlay/) —— 引擎、渲染器、字库、构建脚本 · 详文 [`HW_overlay_framework.zh-CN.md`](HW_overlay_framework.zh-CN.md) |
-| 台架串口工具链 | [`code/serial/`](code/serial/) —— 57600 root shell 上推/拉/跑/杀,不用插 U 盘 · poke 循环见 [`code/sh4tools/SERIAL_LOOP.md`](code/sh4tools/SERIAL_LOOP.md) |
 
-**BT 修复** —— 组成 = stock + fmguard(锁BT)+ child-chain cave(开机出声);交付方式是**刷 IFS1**。
-**状态** = ✅ **台架** 与 **真车(911/9x1)** 双双实刷确认
+### 为什么蓝牙修复必须靠刷写
 
-> 为什么必须刷,不能做成 runtime 补丁?`/proc/<pid>/as` 只写得进 RW 页,**写只读 code/rodata 会失败**(CoW 墙 —— journey 的 Dead end ③)。两个 cave 都在 RX 段,所以这硬件上**做不了运行时代码注入**。串口 poke 循环是**找到**修复的手段,刷 IFS1 才是**交付**它的手段。Part 3 的 overlay 是另一回事——独立的 runtime app,完全不涉及刷写。
+`/proc/<pid>/as` 只写得进 RW 页,**写只读 code/rodata 会失败** —— 这就是 CoW 墙,真机实证([journey 的 Dead end ③](全过程_中文.md))。两个 cave 都在 RX 段,所以这硬件上**做不了运行时代码注入**。串口 poke 循环是**找到**修复的手段,刷 IFS1 才是**交付**它的手段。
 
 > 注:台架(MOPF / `IFS_G1_E2`)和真车(`IFS_9X1`)的 `PCM3Root` **二进制字节完全相同**,只有周围的 imagefs 不同。所以真车进的就是台架上验过的那一份。定位 `PCM3Root` 要走 **imagefs 目录**(`mnt/ifs1/HBproject/PCM3Root`),**别用 ELF 头去搜**——镜像里每个 SH4 可执行文件开头都一样,你一定会抽错文件。
+
+---
+
+# Runtime 功能
+
+与原厂软件并行运行的独立 app。它们**从不写 flash**,所以砖不了机器,重启即消失。
+
+## 硬件图层 overlay 框架(2026-07-20)
+
+![音量 OSD 画在我们自己的硬件图层上, 压在原厂 Jukebox 页之上](images/06-overlay-volume-osd.jpg)
+
+*我们自绘的音量 OSD,画在独立的 Carmine 硬件图层上,压在完全没动过的原厂 UI 之上。注意底下的原厂页面照常工作 —— 进度条在走、时钟在跳、选中的按钮仍然高亮。全程零刷写,弹窗纯运行时。*
+
+- **目标**:在原厂 UI 之上叠加自绘弹窗(音量 OSD、提示、对话框),完全不刷 flash。
+- **做法**:作为**第二个 gf 客户端**,抢一个 `layermanager` 从不分配的空闲 Carmine 硬件层。各硬件层有各自独立的 scanout 缓冲 → 物理上碰不到原厂 UI 的缓冲和锁,老方案"共享原厂 surface"导致的残影/撕裂在硬件层面消失。
+- **状态**:台架实证通过 —— 全彩、抗锯齿字体、真圆角透明、音量条跟着旋钮实时走、松手 1.4 秒自动收起。
+- **三个各值一天的坑**:驱动把**层号反转**(`硬件层 = 7 − gf层`,所以要用 gf5);像素格式是 **RGBA5551 而不是 API 报的 ARGB1555**;以及**每次 `gf_layer_update` 前必须完整重申**,否则永久死锁在 `gdcServerCarmine`。
+- 代码:[`code/overlay/`](code/overlay/) · 详细文档:[`HW_overlay_framework.zh-CN.md`](HW_overlay_framework.zh-CN.md)([English](HW_overlay_framework.md))
+
+---
+
+# 工具链
+
+## 台架串口工具链
+
+57600 root shell 开发闭环 —— 推二进制、跑、拉日志、杀掉,**不用插 U 盘、不用重刷**。只改布局的话推 348 字节就行,不必传 66 KB 二进制。
+
+- [`code/serial/`](code/serial/) —— `ser_push.py`(分块上传 + cksum 校验)、`ser_pull.py`、`ser2.py`(执行命令)、`ser_kill.py`。
+- [`code/sh4tools/SERIAL_LOOP.md`](code/sh4tools/SERIAL_LOOP.md) —— 与之配套的 `/proc/<pid>/as` poke 循环,以及**它够得着什么、够不着什么**。
+
+## 逆向 + 构建
+
+- [`code/`](code/) —— cave 汇编器、`sh4emu.py`(在内存快照上真执行 `PCM3Root` 函数的 SH4 解释器)、IFS inflate/patch/deflate 管线,以及 `verify_ifs_flashable.py`(两台报废台架换来的刷前门)。
+- 完整索引见 [`code/README.md`](code/README.md)。
+
+---
+
+## 仓库结构
+
+```
+README.md / README.zh-CN.md         本索引
+journey_English.md / 全过程_中文.md   蓝牙修复完整故事 + 所有死路
+HW_overlay_framework.md (+.zh-CN)   overlay 框架详文
+code/
+  build_*.py, sh4emu.py, ...        蓝牙修复:汇编器、模拟器、IFS 管线
+  overlay/                          硬件图层 overlay 框架
+  serial/                           台架串口工具链
+  sh4tools/                         设备端 C 工具(mempoke)+ SERIAL_LOOP.md
+  autorun/                          USB autorun 刷写脚本
+images/                             台架照片与截图
+```
+
+## 加新 feature 的约定
+
+这套结构能吸收新东西,**不需要重新编号**:
+
+1. **代码** → 自己的 `code/<feature>/` 目录(像 `overlay/`、`serial/` 那样),里面放一个短 `README.md`,写清那些不写下来就得让下一个人重新踩的坑。
+2. **文档** → 仓库根目录 `<Feature>.md` + `<Feature>.zh-CN.md`。**英文是主文档,中文是译本** —— 和本 README 同一约定。
+3. **索引** → 在*这个仓库里有什么*加一行,并在 **Runtime 功能**下加一个 `##` 小节(如果它是靠刷写交付的,就像**蓝牙修复**那样单开一个顶级小节)。
+4. **写明怎么交付** —— runtime app 还是刷写补丁。这一条决定风险画像,是任何读者最先需要知道的。
+5. **把死路留下。** "我试过什么、为什么不行"是这些文档里最值钱的部分;一个没有死路记录的 feature,会让下一个人再付一遍你付过的那些天。
 
 ---
 
