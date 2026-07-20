@@ -60,7 +60,7 @@ main = *(*(*(child + 0x38) + 0x08) + 0x70)
 - **做法**:作为**第二个 gf 客户端**,抢一个 `layermanager` 从不分配的空闲 Carmine 硬件层。各硬件层有各自独立的 scanout 缓冲 → 物理上碰不到原厂 UI 的缓冲和锁,老方案"共享原厂 surface"导致的残影/撕裂在硬件层面消失。
 - **状态**:台架实证通过 —— 全彩、抗锯齿字体、真圆角透明、音量条跟着旋钮实时走、松手 1.4 秒自动收起。零刷写。
 - **三个各值一天的坑**:驱动把**层号反转**(`硬件层 = 7 − gf层`,所以要用 gf5);像素格式是 **RGBA5551 而不是 API 报的 ARGB1555**;以及**每次 `gf_layer_update` 前必须完整重申**,否则永久死锁在 `gdcServerCarmine`。
-- 代码:[`code/overlay/`](code/overlay/) · 详细文档:[`HW_overlay_framework.zh-CN.md`](HW_overlay_framework.zh-CN.md)
+- 代码:[`code/overlay/`](code/overlay/) · 详细文档:[`HW_overlay_framework.zh-CN.md`](HW_overlay_framework.zh-CN.md)([English](HW_overlay_framework.md))
 
 ## 交付物
 

@@ -2,6 +2,8 @@
 
 在原厂 UI 之上叠加自绘弹窗(音量 OSD、提示、对话框),**零刷 flash、零残影、与原厂 UI 物理隔离**。
 
+> [English](HW_overlay_framework.md) · **简体中文**
+
 ![音量 OSD 画在独立硬件图层上](images/06-overlay-volume-osd.jpg)
 
 *台架实拍:我们自绘的音量 OSD 压在原厂 Jukebox 页之上。底下的原厂页面照常工作 —— 进度条在走、时钟在跳、选中按钮仍高亮。零刷写。*
