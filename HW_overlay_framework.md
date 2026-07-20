@@ -146,6 +146,20 @@ code/overlay/
 The engine hashes it once a second and re-parses on change — **no recompile, no 66 KB
 binary transfer**. That is an order-of-magnitude difference in iteration speed.
 
+### Writing a `ui.def` — one gotcha
+
+**The panel's drawable height is `h - shadow`, not `h`** (`ui_render`: `ph = H - sh`), and
+likewise its width is `w - shadow`. The shadow is carved out of the bottom and right edges.
+
+So to centre an element of height `eh` vertically you want `(h - shadow - eh) / 2`, not
+`(h - eh) / 2`. Getting this wrong pushes everything down by `shadow/2` — which is exactly
+the bug we shipped first: with `h=76, shadow=12` the panel is only 64 tall, but the element
+positions had been computed against 76, so the whole layout sat low and the progress bar
+had roughly twice as much padding above it as below.
+
+Note also that `ui_icon` centres on `y + 8`, so an icon's `icon_y` is its *top*, not its
+centre.
+
 ### Render pipeline
 
 ```
