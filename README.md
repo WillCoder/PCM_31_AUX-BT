@@ -50,6 +50,14 @@ One more trap worth knowing: `entertSourceChanged` forks on `main+0x944`. **Zero
 
 ---
 
+## Part 3 · HW-layer overlay framework (2026-07-20)
+
+- **Goal**: draw our own popups (volume OSD, toasts, dialogs) on top of the stock UI, **without flashing anything**.
+- **Approach**: become a *second* gf client and take an idle Carmine hardware layer that `layermanager` never allocates. Each HW layer has its own scanout buffer → physically cannot collide with the stock UI's buffer or locks, so the ghosting/tearing of the old "share the stock surface" approach is gone at the hardware level.
+- **Status**: verified on the bench — full colour, anti-aliased text, true rounded-corner transparency, the bar tracking the volume knob live, auto-dismiss after 1.4 s. Zero flash writes.
+- **Three traps that each cost a day**: the driver **inverts layer numbers** (`hw = 7 − gf`, so use gf 5); the pixel format is **RGBA5551 despite the API reporting ARGB1555**; and **every `gf_layer_update` must be preceded by a full re-assert** or it deadlocks in `gdcServerCarmine` forever.
+- Code: [`code/overlay/`](code/overlay/) · Write-up (Chinese): [`HW_overlay_framework.zh-CN.md`](HW_overlay_framework.zh-CN.md)
+
 ## Deliverables
 
 | | Location |

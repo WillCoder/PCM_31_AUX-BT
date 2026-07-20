@@ -1,0 +1,27 @@
+# 音量弹窗(gauge 类型)
+[gauge volume]
+anchor = center
+w = 372
+h = 76
+radius = 18
+shadow = 12
+panel = 12151c
+accent = f2a828
+fg = f0f3f7
+alpha = 248
+fadein = 160
+hold = 1400
+maxval = 40
+bind = 0
+icon = 1
+icon_x = 26
+icon_y = 30
+icon_color = ccd2da
+bar_x = 64
+bar_y = 36
+bar_w = 228
+bar_h = 12
+bar_track = 333a44
+num = 1
+num_x = 300
+num_y = 24

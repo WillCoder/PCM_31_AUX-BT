@@ -1,0 +1,206 @@
+# PCM 3.1 独立硬件图层弹窗框架
+
+在原厂 UI 之上叠加自绘弹窗(音量 OSD、提示、对话框),**零刷 flash、零残影、与原厂 UI 物理隔离**。
+
+2026-07-20 台架实证通过:全彩、抗锯齿字体、真圆角透明、拧旋钮实时跟手、松手自动收起。
+
+---
+
+## 1. 核心思路
+
+作为**第二个 gf 客户端**,抢一个 layermanager 池外的空闲 Carmine 硬件图层,在上面独立绘制。
+
+各硬件层有**各自独立的 scanout 缓冲**,所以我们写自己的层**永远碰不到原厂 UI(cid 0x1f)的缓冲和锁** —— 老方案"共享 0x1f"导致的争用、残影、动态页闪烁,在物理层面消失。
+
+**关键架构决定:图层只覆盖弹窗矩形,不做整屏透明层。**
+整屏 800×480 的"透明"层实测是整屏发黑。改成 surface 只有弹窗大小 + `gf_layer_set_dst_viewport` 定位后,框外硬件根本不合成我们,隔离更彻底。
+
+---
+
+## 2. 必须知道的硬件事实
+
+这些都是踩坑踩出来的,**不看这一节会白干一整天**。
+
+### 2.1 ★★★ gf 层号被驱动反转:`硬件层号 = 7 − gf层号`
+
+`devg-carmine.so` 三处独立做 `neg rN,r1 / add #7,r1`(`carmine_layer_query@0x12cec`、`set_surface@0x12f86`、`set_dest_viewport@0x13124`)。
+
+| gf 层号 | 硬件层 | 能不能用 |
+|---|---|---|
+| **5** | **L2** | ✅ **用这个** —— 干净的通用 direct-color 层 |
+| 6 | L1 | ❌ 视频采集/W 层。驱动通用路径无条件往 `L1EM bits1:0` 写值,而手册 p.412 写明那两位在 L1 上是 **Reserved** → **高 6 位全死,红色永远出不来**,而且垂直方向会截断 |
+| 7 | L0 | ❌ 在 layermanager 管辖内,会被反复 disable,表现为周期性闪烁 |
+
+> 曾经花一整晚在"层 6"上排查"为什么只有蓝绿黑"。根因就是这条反转 —— 我们以为在 L6,其实在 L1。
+
+### 2.2 像素格式是 RGBA5551,**不是** ARGB1555
+
+`gf_layer_query` 报的 `0x1710`(ARGB1555)是**谎报**。驱动对 16bpp 一律写 `LnEC=0b10`,手册 p.430 定义为 "Direct color (16 bits/pixel) **RGBA** mode",§7.3.2 给出:
+
+```
+bit15..11 = R    bit10..6 = G    bit5..1 = B    bit0 = A
+```
+
+且"输出向 MSB 侧移 3 位"(实测 5bit 值 15→120、31→248,完全吻合)。
+
+```c
+#define RGBA5551(r,g,b) ((u16)((((r)&0x1f)<<11)|(((g)&0x1f)<<6)|(((b)&0x1f)<<1)|1u))
+/* 纯红 0xF801 / 纯绿 0x07C1 / 纯蓝 0x003F / 纯白 0xFFFF / 透明 0x0000 */
+```
+
+`ui_core.c` 的 `ui_rgb()` 本来就是这个排布,零改动即可复用。
+
+### 2.3 透明度能力边界
+
+| 能力 | 有没有 | 说明 |
+|---|---|---|
+| 逐像素**开/关**透明 | ✅ **白捡** | 不调 `set_blending`(默认模式)时,写 `0x0000` 就是真透明,原厂 UI 直接透出来。圆角/镂空/任意形状都成立 |
+| 面板**内部**的抗锯齿/渐变 | ✅ **完整 8bit** | 那是在我们自己的面板底色上做的**软件**混合(`ui_core.c` 的覆盖度模型),不受硬件限制。实测文字边缘完美 |
+| 8bit **渐变半透**(软阴影/淡入淡出) | ❌ 需额外工程 | 要走 `GF_ALPHA_M1_MAP`(mode `0x00080102`)+ 一个 `GF_FORMAT_BYTE` 的独立 alpha 平面 surface |
+
+`gf_layer_set_blending` **只接受 9 个 mode**:
+`{0, 0x00040102, 0x00040201, 0x00080102, 0x00080201, 0x04000408, 0x04000804, 0x08000408, 0x08000804}`
+传 `SRC_PIXEL_ALPHA`(`0x00010102`)会走错误分支返回 9、**根本不发消息**,静默失效。
+
+### 2.4 ★★★ 死锁铁律:`gf_layer_update` 前必须走完整重申序列
+
+```
+gf_layer_set_surfaces → set_src_viewport → set_dst_viewport
+  → gf_display_set_layer_order → gf_layer_enable → gf_layer_update
+```
+
+- **裸调 `gf_layer_update`(不重申)会永久 REPLY-block 在 `gdcServerCarmine`(pid 4104)** —— 没有 pending 变更时它在等一个永远不来的 vsync。
+- **`gf_layer_disable` + `update` 同样永久死锁。** 所以 OSD 的"收起"**不能用 disable**,要用"把可见区刷成 `0x0000` 再 push"(层保持 enable)。
+- 实现上把上屏收敛成**唯一出口 `push_layer()`**,新代码不许绕过。
+
+排查:`pidin | grep <名>` 看 **Blocked 列** —— `REPLY 4104` = 卡在 gdc;`REPLY 3` = 卡在串口 `devc-sersci`(另一个坑,见 §5)。
+
+### 2.5 其它
+
+- **dst viewport 高度算法不对称**:`carmine_layer_set_dest_viewport@0x13100` 里 宽 = `x2-x1+1`,高 = **`y2-y1`(无 +1)**。要 H 行须传 `y2 = y1+H`。
+- **`gf_layer_update` 返回码是硬编码 0**(`8873c: mov #0,r1`),**不能当成功判据**。
+- **库完全不校验格式**:`gf_layer_choose_format@0x88844` 是空桩(`mov #0,r0; rts`)。`gf_surface_create_layer` 返回 0 + stride 合理**只证明客户端算术**,不代表硬件接受。传 BGRA8888 照样"成功",然后硬件按自己的模式扫出垃圾。
+- **设备上没有 `libgf.so.1`**。`/proc/boot/` 只有 `libgdcApiCarmine.so`(且它**没有 SONAME 项**,动态链接器纯按 NEEDED 文件名找)。必须把 stub 的 soname 设成 `libgdcApiCarmine.so`,否则重启即丢。
+- **`BOXX` 无对齐要求**:dst x 路径全程无掩码,任意像素位置都行。
+- 💣 **永远不要调 `gf_layer_set_chroma`**:`carmine_layer_program@0x13640` 在 RGBA 分支里把透明色按 **ARGB1555** 打包写进 LnETC,与实际扫出的 RGBA5551 不一致,key 值必然错位。
+
+---
+
+## 3. 代码结构
+
+```
+coexist-app/mvp/
+  coexist_pop.c    弹窗引擎(本框架的主程序)
+  ui_core.c        共享渲染核心 + ui.def 解析器 —— 与 Mac 预览器同一份
+  ui_font.h        离线烤的字库(数字 + 比例字体, 含汉字)
+  ui.def           弹窗描述(几何/配色/动画/绑定) —— 纯文本, 热加载
+  gf_defs.h        gf 常量/结构体/原型(从设备真库反汇编重建)
+```
+
+**引擎 / 内容分离**:改布局、配色、位置只要推 **348 字节的 `ui.def`**,引擎每秒查一次 FNV 哈希,变了就重解析重画 —— **不用重编、不用重推 66KB 二进制**。迭代速度差一个数量级。
+
+### 渲染流程
+
+```
+ui_render()  →  ui_popbuf(RGBA5551 颜色) + ui_cov(8bit 覆盖度)
+             →  blit_layer(): cv>=128 ? (色|1) : 0x0000
+             →  push_layer(): 完整重申 + update
+```
+
+surface 一次建 `UI_MAXW×UI_MAXH`(520×220),之后靠 **src viewport 裁剪 + dst viewport 定位** —— `ui.def` 改几何时**不需要重建 surface**。
+
+---
+
+## 4. 活体音量链(V4)
+
+拧旋钮实时跟手的数据来源。**原样沿用台架已验证的 `coexist_vol.c` v37,一个常量都没改。**
+
+```
+扫堆找 u32 == 0x085c76fc
+  且 u32@(X+0x160) == X-0x218
+  且 u32@(X-0x218) == 0x085c4c5c        → 得 V
+P  = u32@(V+0x168)
+ok = u32@(P+0xc8) == 2                   (DATA_OK)
+音量 = u8@(P+0x7c)                       (0..40)  ★
+src = u32@(P+0x74) ∈ {34,35}             → 铃声, 要丢掉
+```
+
+读法:`open /proc/<PCM3Root pid>/as` + `lseek` + `read`,**纯只读,不碰任何 IPC/IOC 通道**(那条把真车和台架都挂死过)。堆扫描范围 `0x0866e200 – 0x08a00000`,64KB 一块。
+
+> ⚠️ **这里的 `0x218` 是结构校验偏移,不是音量。**
+> 被证否的那个"0x218 = 主音量"是**持久化文件**里的偏移(真相是 SMS 提示音 slot 9)—— 两个命名空间数字撞车,**别"顺手改正"**。
+
+### 取值层的四道防护
+
+| 防护 | 为什么 |
+|---|---|
+| **去抖**(连续 2 次同值才认) | idle 时缓存会在 19/20 之间自己抖 → 没人碰旋钮弹窗也会自己蹦 |
+| **开机播种**(首个有效值只记不画) | 否则开机、改 ui.def 都会弹一次 |
+| **覆盖态日志** | `/tmp/uival` 测试残留会**永久锁死活体链**且毫无提示 |
+| **掉线重定位**(连续 10s 读不到才重扫) | 阈值要比一次来电长,否则来电就白扫 3.57MB |
+
+> ⚠️ 别照抄 `coexist_vol.c` 的重扫守卫 —— **那段是死代码**(`int vol=-1;` 从未赋值 → `vol<0` 恒真 → 每 50 拍无条件全堆扫)。
+
+---
+
+## 5. 台架开发闭环(不用插 U 盘)
+
+```bash
+# 编译(脚本会在检测到 error: 时中止, 不会留旧二进制骗你)
+bash dev/build_coexist_vol.sh coexist-app/mvp/coexist_pop.c coexist-app/mvp/coexist_pop
+
+# 推送(~97 秒 / 66KB), 自动比对 cksum
+python3 scratchpad/ser_push.py coexist-app/mvp/coexist_pop.stripped /tmp/coexist_pop 192
+
+# 起进程 —— 三个重定向一个都不能少(见下)
+python3 scratchpad/ser2.py 'chmod 755 /tmp/coexist_pop; /tmp/coexist_pop </dev/null >/dev/null 2>/dev/null &'
+
+# 拉日志
+python3 scratchpad/ser_pull.py /tmp/pop.txt scratchpad/pop.txt
+
+# 只改布局/配色: 推 348 字节即可, 不用重编重推
+python3 scratchpad/ser_push.py coexist-app/mvp/ui.def /tmp/ui.def 192
+
+# 手动指定显示值(测渲染), 删掉文件回到活体音量
+python3 scratchpad/ser2.py 'echo 30 > /tmp/uival'
+python3 scratchpad/ser2.py 'rm -f /tmp/uival'
+```
+
+### 串口相关的坑
+
+1. **启动必须 `</dev/null >/dev/null 2>/dev/null`。**
+   串口插着没人读 → `devc-sersci`(pid 3)缓冲满 → 任何写控制台的进程**永久 REPLY 阻塞**,伪装成"某个库调用挂死"。这条曾害我们误判 `gf_dev_attach`、反汇编整条 MsgSend 链、白绕数小时。
+
+2. **推完必须比对 cksum**(size 相同不代表内容相同)。
+   `ser_push.py` 曾有个潜伏 bug:某块的**第一个字节恰好是 `-`**(可打印所以原样透传),shell 去引号后 `print` 把它**当成选项** → `print: -\: unknown option` → 整块静默丢失。已修(每块首字节一律转义)。
+   **定位手法**:本地实现 POSIX cksum,枚举"删掉第 N 块"后的值去匹配台架实测 cksum,一次算出是第几块,再单独发那一块看报错 —— 比二分快得多。
+
+3. **台架 grep 不支持 `|` 或运算**(`grep -i "a\|b"` 静默返回空)。要么分开 grep,要么 `grep -E`。曾害我误判"图形栈没起来"。
+
+4. 台架**没有** `dd` / `cp` / `head` / `wc` / `touch`;`slay` 是交互式的(`-f` 也不管用),用 `scratchpad/ser_kill.py` 自动应答。
+
+---
+
+## 6. 已经排除的路线(别再试)
+
+| 路线 | 判决 |
+|---|---|
+| `layermanager.cfg` 的 `reserveLayerForCid` | **断头路**。查到的值存进 `rec+0x2c` 后**没有任何代码再读**,刷了 4 次全无效 |
+| `layerOrder` | 被 chip 门挡死。只有 `graphicChip==1` 才应用;本机 CARMINE16=8 → 强制 identity |
+| `lastAvailableLayer` 改 `0-7` | **会黑屏**。它是**下限**不是上限,方向反的,改了只剩 slot7 可渲染 |
+| 共享原厂 surface 0x1f | 动态页残影是结构性死结,已被本框架取代 |
+| BGRA8888 / 32bpp | 该层不支持。库不校验所以"成功"是假的 |
+| 各种通道序/端序猜测 | 单个 `0xFFFF` 测量即可判死:全 1 像素在任何位排列下都该出饱和白 |
+
+---
+
+## 7. 相关文件
+
+- 知识库详条:`memory/gf-independent-hwlayer-overlay-path-2026-07-19.md`
+- 芯片手册:`emulator-lab/docs/carmine-hw-manual.pdf`(MB86297A,L6 寄存器 p.430-432)
+  ⚠️ **不要**用 `references/datasheets/MB86296S_CORAL-PA_spec.pdf` —— 那是只有 L0-L5 的前代
+- 反汇编配方(两个 .so 都无 section header,`objdump -d` 出空):
+  ```bash
+  docker run --rm -v "$PWD:/work" sh4gdb:latest \
+    objdump -D -b binary -m sh4 -EL --start-address=0x... /work/<path>
+  ```
