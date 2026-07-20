@@ -31,14 +31,18 @@ is instantly reversible. `mempoke.c` is that poke; this is the loop around it.
 
 ## The loop
 
+Pick an **RW** address — a heap object field or `.data` (see the next section for
+why that matters). Heap addresses drift every boot, so resolve them live rather
+than hardcoding; the values below are from one particular boot.
+
 ```
-# read one byte
-mempoke <pid> 0x085c4c5c
-# → old=0x5c   (whatever is live right now)
+# read one byte — here main+0x128, the "is it silent" field
+mempoke <pid> 0x086ec144
+# → old=0xfe   (-2: silent, the bug state)
 
 # write one byte, with readback
-mempoke <pid> 0x085c4c5c 0x07
-# → old=0x5c  new=0x07
+mempoke <pid> 0x086ec144 0x28
+# → old=0xfe  new=0x28
 
 # observe on the head unit, decide, poke again — seconds per turn, no reflash
 ```
@@ -48,14 +52,31 @@ flashed. Change → observe → revert → repeat. This is how the CPSoundPresCt
 gate fields (`child+0x68`, `main+0x128`, …) were mapped bug-vs-working without a
 single reflash.
 
+## What the loop can and can't reach
+
+`/proc/<pid>/as` writes land on **RW pages only** — `.data`, heap. They **fail on
+read-only code/rodata** with `ERR write failed`. That is the CoW wall, proven on
+real hardware (see *Dead end ③* in the journey).
+
+So this loop is for **observing and mapping live state**: reading fields, flipping
+RW values, watching what the app does. It is **not** a way to install a fix. Both
+caves live in the RX segment, so **runtime code injection is not possible on this
+hardware** — no `mprotect`/`mmap`/`devctl` trick was found, and the bench has no
+gdb/pdebug. Every cave ships by flashing IFS1.
+
 Notes:
 - **Don't `cat`/`dd` `/proc/<pid>/as`** on this QNX — it faults. `mempoke` does a
   bounded `lseek`+`read` of exactly the bytes you ask for, which is the safe way.
 - **One byte at a time** by design — smallest blast radius. For a *range* scan
   (locate a code signature, then poke the immediate), see **`mempoke_fix.c`**: it
-  sweeps `[start,end)` for the unique 8-byte FM-index-store signature and flips
-  the `mov #1` immediate `01→07` in one shot — the signature-located, per-build-
-  address-free form of the `{0,10}→FM` reroute.
+  sweeps `[start,end)` for an 8-byte signature and flips the `mov #1` immediate
+  `01→07` in one shot.
+
+  > ⚠️ **`mempoke_fix.c` is a scanning tool, not the fix.** The lever it targets
+  > (`0x082b65e0`, the desiredApp immediate) was an **early experiment here — never
+  > verified**. The clean-firmware diff confirmed it does **not** belong to lock-BT,
+  > and it was **removed** from the final image. Use the tool for locating and
+  > poking; do not treat that address as a working fix.
 
 ## Pairs with the shotgun
 
@@ -66,6 +87,13 @@ runtime reverse-chain (no hardcoded, per-boot-drifting address):
 main = *(*(*(child + 0x38) + 0x08) + 0x70)
 ```
 
-then read the gate fields and poke — same loop, same `/proc/as` primitive.
-`build_shotgun_child_chain.py` assembles the flashed version of that hook; the
-loop here is how you dial it in before you commit it to flash.
+then read the gate fields and watch them move — same loop, same `/proc/as`
+primitive. That is how the bug-vs-working field sets were mapped.
+
+To be explicit about where the loop stops: **poking those fields does not produce
+the fix.** The app never re-requests audio focus on its own, so writing the fields
+*downstream* of the request doesn't un-stick it — the focus getter keeps returning
+`-2`. The working fix is a cave that actually **calls** `entertSourceChanged`
+inside the process, and per the CoW wall above that cave can only be installed by
+flashing IFS1 (`build_shotgun_child_chain.py` assembles it). The loop is how you
+dial it in; the flash is how you ship it.

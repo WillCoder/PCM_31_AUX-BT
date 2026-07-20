@@ -26,7 +26,7 @@ Reverse-engineering and patch-building tools for the PCM_31_AUX-BT fixes.
 
 ## On-device / autorun
 - `sh4tools/mempoke.c` (+ `_start.S`, `start_stack.S`) — the `mp2` 1-byte reader/writer for `/proc/<pid>/as` (build with a QNX SH4 toolchain; use `start_stack.S` so argc/argv are passed).
-- `sh4tools/mempoke_fix.c` — range-scan variant: sweeps `[start,end)` for the unique 8-byte FM-index-store signature and flips the `mov #1` immediate `01→07` — the per-build-address-free `{0,10}→FM` reroute.
+- `sh4tools/mempoke_fix.c` — range-scan variant: sweeps `[start,end)` for an 8-byte signature and flips the `mov #1` immediate `01→07`. ⚠️ **A scanning tool, not the fix** — the lever it targets (`0x082b65e0`, desiredApp) was an unverified early experiment; the diff confirmed it does not belong to lock-BT and it was removed from the final image.
 - **`sh4tools/SERIAL_LOOP.md`** — the live-serial no-reflash iterate loop (57600 root shell + `mempoke`, seconds per turn). This is the primitive the whole fix was found with.
 - `autorun/run.sh` + `copie_scr.sh` — the USB autorun flasher (verifies cksum + ARM file, runs `flashit -v`, one-shot). The `.ifs` payload is **not** included.
 
