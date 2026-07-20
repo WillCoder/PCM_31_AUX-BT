@@ -232,7 +232,14 @@ stock PCM3Root
   + child-shotgun (boot sound): 5 child-vtable slots + cave 0x0856484c
 ```
 
-**Failed experiments removed**: `0x082a4147` (skip-a2dp, long proven to be boot dead code) and `0x082b65e0` (desiredApp lever, an unverified experiment) — the diff confirmed neither belongs to lock-BT, so they are safe to remove.
+**Failed experiments removed**: `0x082a4147` (skip-a2dp, long proven to be boot dead code) and `0x082b65e0` (the desiredApp lever) — the diff confirmed neither belongs to lock-BT, so they are safe to remove.
+
+> ⚠️ **`0x082b65e0` is not merely unproven — it was measured dead on the real car (2026-06-22).** The running `PCM3Root` already read `0x07` there (signature `02 8D 05 1E 07 E1 15 1E`, persisted from an earlier flash) and the car **still booted to FM**. The same session found `0x821694e` (force-MME) also already applied — same result. Two independent reasons it cannot work:
+>
+> 1. **What gets stored was never 7.** LastMode persists as **10 (Default)**, so remapping `mov #1` → `mov #7` retargets a value the persistence layer doesn't produce in this case.
+> 2. **The boot path never executes that function.** `0x82b65e0` sits in the LastMode *persistence handler* (`FUN_0x82b6538`). The boot decision is `CPOnOffPresCtrl @0x8216940` — `mov #9,r1 / cmp/hi r1,r6` with source 10, so `bt.s` takes the `>9` shortcut and `bra`s straight to the non-MME path. `0x82b65e0` is never reached.
+>
+> The deeper point, which is why this whole family of patches fails: **the boot decision is correct given what exists at the time** — A2DP isn't up yet, so it falls to the always-available FM — and nothing re-evaluates when the phone connects seconds later. A working fix has to ride the **connect** event, which is exactly what the child-vtable shotgun does.
 
 Clean IFS: `PCM3_IFS1_MOPF.CHN.clean.ifs`, cksum **4237630296**, size 10230208.
 
