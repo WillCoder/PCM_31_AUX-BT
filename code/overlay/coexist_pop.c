@@ -177,9 +177,13 @@ static int g_cand=-1, g_stable=0;
  * 太短会被来电白白触发一次 3.57MB 全堆扫。
  * ⚠ 不要照抄 coexist_vol.c 的重扫守卫, 那段是死代码(vol 从未赋值 -> 恒真 -> 无条件全扫)。*/
 static int g_fail=0;
-#define RELOC_FAIL_TICKS 100
+#define RELOC_FAIL_TICKS 200   /* 50ms/tick -> 10s */
 
-static int vol_tick(void){
+/* shown=1 表示弹窗正显示着, 即用户正在拧 -> 立即跟随, 不去抖。
+ * 去抖只用来把关"从隐藏状态弹出来"这一下 —— 它防的是没人碰时缓存在 19/20 之间
+ * 自己抖导致弹窗乱蹦, 而不是防拧旋钮。连续拧时每拍值都在变, 去抖会一直不满足,
+ * 结果就是"转的过程中完全不更新, 停手才画", 手感上就是不跟手。 */
+static int vol_tick(int shown){
     int raw = read_vol();
     if(raw < 0){
         if(g_fail < RELOC_FAIL_TICKS) g_fail++;
@@ -192,7 +196,8 @@ static int vol_tick(void){
     g_fail = 0;
     if(raw == g_cand){ if(g_stable < 9) g_stable++; }
     else { g_cand = raw; g_stable = 0; }
-    return (g_stable >= 1) ? g_cand : -1;
+    if(shown) return raw;                    /* 正在拧: 立即跟随 */
+    return (g_stable >= 1) ? g_cand : -1;    /* 从隐藏弹出: 要连续两次同值 */
 }
 
 /* /tmp/uival 手动覆盖(测渲染用, 不去抖 —— 要跟手)。覆盖态翻转时打日志,
@@ -223,12 +228,15 @@ static void blit_layer(UIWidget *w, u16 *dst, int pitch){
         u16_ *pb = ui_popbuf + y*W;
         u8_  *cv = ui_cov    + y*W;
         for(x=0;x<W;x++)
-            d[x] = (cv[x]>=128) ? (u16)(pb[x]|1u) : (u16)0x0000u;  /* A=0 -> 试真透明 */
+            d[x] = (cv[x]>=128) ? (u16)(pb[x]|1u) : (u16)0x0000u;  /* A=0 = 真透明 */
+        d[W] = 0x0000u;                          /* 右邻一列: 防硬件多扫出未写内存 */
     }
+    { u16 *d = dst + (size_t)H*(size_t)pitch;    /* 下邻一行: 同上 */
+      for(x=0;x<=W;x++) d[x] = 0x0000u; }
 }
 
 int main(void){
-    L("COEXIST_POP v5 — 去抖/开机播种/覆盖检测/掉线重定位\n");
+    L("COEXIST_POP v7 — 清掉收起后的残留白线(surface 清零 + 多清一行一列)\n");
 
     /* 0. layermanager 握手(跑通的代码都是这个顺序; 少了它 gf_dev_attach 会阻塞) */
     int lmfd=open(LM_DEV, LM_FLAGS, 0);
@@ -260,6 +268,11 @@ int main(void){
     gf_surface_info_t *si=(gf_surface_info_t*)sinfo;
     if(!si->vaddr){ L("ABORT vaddr=0\n"); hang(); }
     int pitch=(int)si->stride/2;
+    /* 整块 surface 先清零: 我们只用左上角一小块, 但 dst viewport 的高度算法不对称
+     * (RE: 高=y2-y1 无+1), 硬件有可能多扫一行/一列。没清过的地方是未初始化内存,
+     * 扫出来就是屏上一条杂色残留线(实测: 弹窗消失后下方留一条白线)。 */
+    { u16 *z=(u16*)(size_t)si->vaddr; int n;
+      for(n=0; n<pitch*UI_MAXH; n++) z[n]=0x0000u; }
     L("surf vaddr="); Lh((u32)si->vaddr); L(" stride="); Ld((int)si->stride); L(" pitch="); Ld(pitch); L("\n");
 
     /* 3b. 接活体音量: /proc/<PCM3Root pid>/as 只读 */
@@ -282,10 +295,10 @@ int main(void){
       if(w2<8) g_order[w2++]=(unsigned)GF_LAYER; }
 
     int t=0, shown=0, hold_left=0;
-    int hold_ticks = 14;                 /* 100ms/tick -> 1.4s, 之后按 def 的 hold 覆盖 */
+    int hold_ticks = 28;                 /* 50ms/tick -> 1.4s, 之后按 def 的 hold 覆盖 */
     for(;;){
         /* --- ui.def 热加载(每 ~1s 查一次即可, 不用每 100ms) --- */
-        if((t%10)==0){
+        if((t%20)==0){
             int n=slurp(DEF_PATH, defbuf, sizeof(defbuf));
             if(n>0){
                 unsigned h=ui_fnv(defbuf,n);
@@ -296,7 +309,7 @@ int main(void){
                         if(W.w>UI_MAXW) W.w=UI_MAXW;
                         if(W.h>UI_MAXH) W.h=UI_MAXH;
                         ui_anchor(&W,SCRW,SCRH);
-                        if(W.hold>0) hold_ticks = W.hold/100;
+                        if(W.hold>0) hold_ticks = W.hold/50;
                         have=1; last_val=-99999;
                         L("[def] 重载 "); Ld(W.w); L("x"); Ld(W.h);
                         L(" @("); Ld(W.x); L(","); Ld(W.y); L(") hold="); Ld(hold_ticks); L("tick\n");
@@ -307,7 +320,7 @@ int main(void){
 
         /* --- 取值: 手动覆盖优先, 否则活体去抖值 --- */
         int val = read_override();
-        if(val < 0) val = vol_tick();
+        if(val < 0) val = vol_tick(shown);
 
         /* --- 值变了: 画 + 显示 + 重置保持计时 --- */
         if(have && val>=0 && last_val==-99999){
@@ -328,9 +341,13 @@ int main(void){
             else {
                 /* ⚠ 不能用 gf_layer_disable + update 收起 —— 实测会永久 REPLY-block 在
                  * gdcServerCarmine(pid 4104)。改成把可见区刷成全透明, 层保持 enable。 */
-                int yy,xx; u16 *d0=(u16*)(size_t)si->vaddr;
-                for(yy=0;yy<W.h;yy++){ u16 *d=d0+(size_t)yy*(size_t)pitch;
-                    for(xx=0;xx<W.w;xx++) d[xx]=0x0000u; }
+                /* 多清 2 行 2 列: 硬件可能比我们认为的多扫一行(见上面的 off-by-one 说明) */
+                int yy,xx, ch=W.h+2, cw=W.w+2;
+                if(ch>UI_MAXH) ch=UI_MAXH;
+                if(cw>pitch)   cw=pitch;
+                u16 *d0=(u16*)(size_t)si->vaddr;
+                for(yy=0;yy<ch;yy++){ u16 *d=d0+(size_t)yy*(size_t)pitch;
+                    for(xx=0;xx<cw;xx++) d[xx]=0x0000u; }
                 push_layer(W.x,W.y,W.w,W.h);
                 shown=0; L("[hide]\n");
             }
@@ -338,8 +355,8 @@ int main(void){
 
         /* --- 显示期间低频重申层序, 防被 layermanager 挤掉 --- */
         t++;
-        if(shown && (t%10)==0) push_layer(W.x,W.y,W.w,W.h);
-        usleep(100000);
+        if(shown && (t%20)==0) push_layer(W.x,W.y,W.w,W.h);
+        usleep(50000);          /* 20Hz 轮询 */
     }
     return 0;
 }

@@ -133,8 +133,8 @@ surface 一次建 `UI_MAXW×UI_MAXH`(520×220),之后靠 **src viewport 裁剪 +
 
 拧旋钮实时跟手的数据来源。**原样沿用台架已验证的 `coexist_vol.c` v37,一个常量都没改。**
 
-> `coexist_vol.c` 是独立音量 OSD 的前身,**不在本仓库**——已由 `code/overlay/coexist_pop.c`
-> 取代。这里点名它只是为了记录这些常量的出处,以及它们没有被重新推导过。
+> `coexist_vol.c` 是独立音量 OSD 的**前身**,已由 `coexist_pop.c` 取代(不随本框架一起发布)。
+> 这里点名它,只是为了记录这些常量的出处,以及它们没有被重新推导过。
 
 ```
 扫堆找 u32 == 0x085c76fc
@@ -217,8 +217,7 @@ python3 code/serial/ser2.py 'rm -f /tmp/uival'
 
 ## 7. 相关文件
 
-- 知识库详条:`memory/gf-independent-hwlayer-overlay-path-2026-07-19.md`
-- 芯片手册:MB86297A(MB86297A,L6 寄存器 p.430-432)
+- 芯片手册:`emulator-lab/docs/carmine-hw-manual.pdf`(MB86297A,L6 寄存器 p.430-432)
   ⚠️ **不要**用 `references/datasheets/MB86296S_CORAL-PA_spec.pdf` —— 那是只有 L0-L5 的前代
 - 反汇编配方(两个 .so 都无 section header,`objdump -d` 出空):
   ```bash
