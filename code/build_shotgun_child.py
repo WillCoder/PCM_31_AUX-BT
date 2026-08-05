@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# 🚨🚨 警告: 本文件的 CODE cave 地址 0x0856484c 【不是死区】🚨🚨
+# 它是一张【活的】50x50 音频源仲裁矩阵(基址 0x0856421c, 2500B, 读取者 FUN_080eaa0c
+# = B[row*50+col])的稀疏内部; cave 落在 行31(AUDIO_PAUSE, 活行) 列34。
+# 往里写代码会污染音频源仲裁。childchain 那次刷进真车"能用"属侥幸, 不是安全。
+# ✅ 新工作请用已证明安全的 cave: **0x0860CA58** (1920B, 任意对齐零引用 + 几何闭合 +
+#    结构性排除, 内容=链接期删除函数遗留的孤儿调试字符串)。
+# 详见 memory: cave-0x0856484c-is-NOT-dead-audio-arbitration-table.md
+
 """shotgun-CHILD (ROBUST): instrument child-vtable (0x085700e0, 5 methods).
 
 main is a HEAP address that drifts across firmware images / boots (bench working

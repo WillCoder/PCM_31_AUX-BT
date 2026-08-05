@@ -87,7 +87,7 @@ One more trap worth knowing: `entertSourceChanged` forks on `main+0x944`. **Zero
 
 Separate apps that run alongside the stock software. They **never write flash**, so they cannot brick anything and they vanish on reboot.
 
-## HW-layer overlay framework (2026-07-20)
+## HW-layer overlay framework (2026-07-20, shipped to a real car 2026-08-04)
 
 ![volume OSD drawn on our own hardware layer, over the stock Jukebox page](images/06-overlay-volume-osd.jpg)
 
@@ -95,8 +95,23 @@ Separate apps that run alongside the stock software. They **never write flash**,
 
 - **Goal**: draw our own popups (volume OSD, toasts, dialogs) on top of the stock UI, without flashing anything.
 - **Approach**: become a *second* gf client and take an idle Carmine hardware layer that `layermanager` never allocates. Each HW layer has its own scanout buffer → physically cannot collide with the stock UI's buffer or locks, so the ghosting/tearing of the old "share the stock surface" approach is gone at the hardware level.
-- **Status**: verified on the bench — full colour, anti-aliased text, true rounded-corner transparency, the bar tracking the volume knob live, auto-dismiss after 1.4 s.
-- **Three traps that each cost a day**: the driver **inverts layer numbers** (`hw = 7 − gf`, so use gf 5); the pixel format is **RGBA5551 despite the API reporting ARGB1555**; and **every `gf_layer_update` must be preceded by a full re-assert** or it deadlocks in `gdcServerCarmine` forever.
+- **Status**: running on a real car. Translucent Material-style panel with a real 8-bit
+  alpha plane (soft rounded corners, elevation shadow), the bar tracking the volume knob
+  live, and — the part that took longest — coexisting correctly with the parking-radar and
+  reversing-camera displays.
+- **The lesson that mattered most**: you never own a hardware layer. There is no ownership
+  gate; the per-layer state is one shared record and the last writer wins. Hunting for "a
+  layer nobody uses" is a dead end because **the layer map differs per vehicle model** —
+  the layer that measured completely idle across 221 s on a Panamera bench turned out to be
+  the PDC radar layer on a 911. The answer is a **yield protocol**: watch your own layer's
+  record every tick, and the moment the stock stack starts using it, *stop touching it
+  entirely* until it goes idle again. That mirrors the OEM's own priority model and needs
+  no knowledge of any vehicle's layer map. See §2.6 of the write-up.
+- **Traps that each cost a day**: the driver **inverts layer numbers** (`hw = 7 − gf`); the
+  pixel format is **RGBA5551 despite the API reporting ARGB1555**; **every
+  `gf_layer_update` must be preceded by a full re-assert** or it deadlocks in
+  `gdcServerCarmine`; and an alpha plane's **byte stride must be 64-byte aligned** or the
+  whole panel shears into diagonal bands.
 - Code: [`code/overlay/`](code/overlay/) · Full write-up: [`HW_overlay_framework.md`](HW_overlay_framework.md) ([简体中文](HW_overlay_framework.zh-CN.md))
 
 ---

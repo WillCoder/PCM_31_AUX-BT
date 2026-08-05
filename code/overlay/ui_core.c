@@ -26,19 +26,31 @@ typedef struct {
     char name[16];
     char title[48], msg[64];      /* toast/dialog/warn 文本(UTF-8) */
     int  x,y,w,h,radius,shadow;
-    u16_ panel, accent, fg;       /* 面板/强调色/文字 */
+    int  shadow_a, shadow_dx, shadow_dy;  /* 投影浓度 0..255 / 水平偏移 / 垂直偏移(热调) */
+    u16_ panel, panel2, accent, fg;  /* 面板顶色/面板底色(渐变,0=纯色)/强调色/文字 */
     int  alpha, fadein, hold, anim; /* anim: 0=淡 1=滑上 2=缩放 */
+    int  panel_alpha;             /* v20: 面板底色的逐像素 alpha(0..255)。255=不开硬件混合(同v19) */
     int  bind, maxval;
     int  bar_x,bar_y,bar_w,bar_h; u16_ bar_track;
-    int  num_x,num_y; int has_num;
+    int  num_x,num_y; int has_num; int num_scale;   /* 数字缩放百分比, 100=原尺寸 */
     int  icon;                    /* 0=无 1=喇叭 2=静音 3=蓝牙 4=警告 */
     int  icon_x,icon_y; u16_ icon_color;
 } UIWidget;
 
-#define UI_MAXW 520
+/* 🚨 512 不是随便取的: alpha 平面(GF_FORMAT_BYTE, 每像素1字节)按【像素 pitch】建宽,
+ * 其 byte stride 就等于 pitch —— 而硬件的 alpha 取样器要求 **stride 64 字节对齐**。
+ * 2026-08-04 台架 2x2 因子实验实测: pitch=512(=8x64) 干净; pitch=544(=8.5x64) 整屏条纹;
+ * alpha 宽取 372 也条纹。UI_MAXW=520 会得到 stride 1088 -> pitch 544 -> 不对齐。
+ * 512*2=1024 本就 64 对齐, pitch=512 也对齐。要更宽就取 768(=12x64) 这类值。 */
+#define UI_MAXW 512
 #define UI_MAXH 220
 static u16_ ui_popbuf[UI_MAXW*UI_MAXH];   /* 颜色 */
 static u8_  ui_cov   [UI_MAXW*UI_MAXH];    /* 覆盖度 0..255 */
+/* ★ v20: 每像素目标不透明度。以前只有 1bit alpha, "面板半透/文字不透"做不到, 所以没有它;
+ * 打通真 8 位 alpha 平面后, 必须由渲染器直接说明每个像素该有多不透明 ——
+ * 靠"颜色是否等于 panel"去反推是错的(面板一加渐变, 颜色就不等于 panel 了)。 */
+static u8_  ui_al    [UI_MAXW*UI_MAXH];    /* 目标不透明度 0..255 */
+static int  ui_cur_a = 255;                /* 当前绘制笔的不透明度 */
 static u16_ ui_bgbuf [UI_MAXW*UI_MAXH];    /* 存下的背景 */
 
 /* ---------------- RGBA5551 + 混合 ---------------- */
@@ -54,12 +66,14 @@ static int  ui_W,ui_H;                    /* 当前渲染尺寸 */
 static void ui_px(int x,int y,u16_ c,int cov){
     if(x<0||x>=ui_W||y<0||y>=ui_H||cov<=0) return;
     int i=y*ui_W+x;
-    if(cov>=255){ ui_popbuf[i]=c; ui_cov[i]=255; return; }
+    if(cov>=255){ ui_popbuf[i]=c; ui_cov[i]=255; ui_al[i]=(u8_)ui_cur_a; return; }
     if(ui_cov[i]>=250){                      /* 已不透明底: 叠加混色, 覆盖不变 */
         ui_popbuf[i]=ui_blend(ui_popbuf[i],c,cov+(cov>>7));
+        if(ui_cur_a>ui_al[i]) ui_al[i]=(u8_)ui_cur_a;   /* 内容画在面板上 -> 取内容的不透明度 */
     } else {                                 /* 透明/半透底: 设色 + 覆盖取大(避免混进黑底压黑) */
         ui_popbuf[i]=c;
         if(cov>ui_cov[i]) ui_cov[i]=(u8_)cov;
+        ui_al[i]=(u8_)ui_cur_a;
     }
 }
 static void ui_fill(int x,int y,int w,int h,u16_ c){
@@ -74,35 +88,71 @@ static void ui_tri(int x0,int y0,int x1,int y1,int x2,int y2,u16_ c){
                 if(xi<xb)xb=xi; if(xi>xa)xa=xi; } }
         if(xa>=xb){ int x; for(x=xb;x<=xa;x++) ui_px(x,y,c,255); } }
 }
-/* 圆角矩形(AA 角): 面板本体 */
-static void ui_round(int x,int y,int w,int h,int R,u16_ c){
-    int yy,xx; for(yy=0;yy<h;yy++) for(xx=0;xx<w;xx++){
-        int cov=255;
-        int cx=-1,cy=-1;
-        if(xx<R&&yy<R){cx=R;cy=R;} else if(xx>=w-R&&yy<R){cx=w-R-1;cy=R;}
-        else if(xx<R&&yy>=h-R){cx=R;cy=h-R-1;} else if(xx>=w-R&&yy>=h-R){cx=w-R-1;cy=h-R-1;}
-        if(cx>=0){ int dx=xx-cx,dy=yy-cy; int d2=dx*dx+dy*dy;
-            if(d2 > R*R) cov=0; else if(d2 > (R-1)*(R-1)) cov=140; }   /* 边缘 AA */
-        if(cov) ui_px(x+xx,y+yy,c,cov);
+/* 圆角矩形。★ v20: 两处升级 ——
+ *   ① 角上的抗锯齿从"三档硬切(255/140/0)"改成**按距离线性过渡**。
+ *      以前只有 1bit alpha, 边缘再软也会被二值化掉, 所以三档够用;
+ *      2026-08-04 打通了真 8 位逐像素 alpha, 软边能真的显示出来了, 值得做细。
+ *   ② 支持**竖向渐变**(ctop -> cbot), 深色面板有微渐变会明显显得高级;
+ *      ctop==cbot 时退化成纯色, 与旧行为一致。 */
+static void ui_round_g(int x,int y,int w,int h,int R,u16_ ctop,u16_ cbot){
+    int yy,xx;
+    int rin=(R-1)*(R-1), rout=R*R, span=rout-rin;
+    if(span<1) span=1;
+    for(yy=0;yy<h;yy++){
+        u16_ c = (ctop==cbot) ? ctop
+               : ui_blend(ctop, cbot, (h>1)? (yy*256/(h-1)) : 0);
+        for(xx=0;xx<w;xx++){
+            int cov=255, cx=-1,cy=-1;
+            if(xx<R&&yy<R){cx=R;cy=R;} else if(xx>=w-R&&yy<R){cx=w-R-1;cy=R;}
+            else if(xx<R&&yy>=h-R){cx=R;cy=h-R-1;} else if(xx>=w-R&&yy>=h-R){cx=w-R-1;cy=h-R-1;}
+            if(cx>=0){ int dx=xx-cx,dy=yy-cy,d2=dx*dx+dy*dy;
+                if(d2>=rout) cov=0;
+                else if(d2>rin) cov = 255 - (d2-rin)*255/span; }
+            if(cov) ui_px(x+xx,y+yy,c,cov);
+        }
     }
 }
-/* 软投影: 面板矩形外一圈黑色渐隐(offset 向下右, 制造深度) */
-static void ui_shadow(int px,int py,int pw,int ph,int R,int sr){
-    int ox=2, oy=3, i,j;                              /* 光源左上 -> 影子右下 */
-    for(j=-sr;j<ph+sr;j++) for(i=-sr;i<pw+sr;i++){
-        /* 到面板矩形(含圆角简化为矩形)的距离 */
-        int dx=0,dy=0;
-        if(i<R) dx=R-i; else if(i>pw-1-R) dx=i-(pw-1-R);
-        if(j<R) dy=R-j; else if(j>ph-1-R) dy=j-(ph-1-R);
-        int inside = (i>=0&&i<pw&&j>=0&&j<ph);
-        int d = dx>dy?dx:dy;
-        if(inside && d<R) continue;                    /* 面板内不画影 */
-        int dd = i<0? -i : (i>=pw? i-pw+1:0);
-        int de = j<0? -j : (j>=ph? j-ph+1:0);
-        int dist = dd>de?dd:de;
-        int cov = 90 - dist*90/sr;                     /* 渐隐 */
-        if(cov>0) ui_px(px+i+ox, py+j+oy, ui_rgb(0,0,0), cov);
+static void ui_round(int x,int y,int w,int h,int R,u16_ c){ ui_round_g(x,y,w,h,R,c,c); }
+/* 软投影。★ v20 两次重写, 记下踩过的坑:
+ *   ①(旧)矩形距离 -> 面板做成胶囊形时投影是个方框, 屏上一圈方形浅边。
+ *   ②(第一次改)按圆角距离算出一个"环", 再把整个环平移 (ox,oy) ->
+ *      **环的内边界也跟着外移, 面板和投影之间裂开一条 2~3px 的缝**
+ *      (台架截图采样实锤: 面板右边到 x=390, x=391..393 是纯背景, x=394 才开始有影)。
+ *   ③(现在)正解 = 投影从【平移后的面板形状】投出, 形状内部给满浓度, 整片画在面板【底下】,
+ *      重叠部分自然被面板盖住 -> 无缝。渐隐用二次曲线, 尾巴比线性柔。
+ * 距离用标准 rounded-box SDF 的整数版: q=max(|p-中心|-(半尺寸-R),0); dist=|q|-R。*/
+static int ui_isqrt(int v){ int r=0,b=1<<15; while(b){ int t=r+b; if(t*t<=v) r=t; b>>=1; } return r; }
+
+/* 单趟投影: 从【平移后的面板形状】投出, 形状内部满浓度(会被面板盖住), 外部二次渐隐。
+ * 距离 = 标准 rounded-box SDF 整数版: q=max(|p-中心|-(半尺寸-R),0); dist=|q|-R。*/
+static void ui_shadow_pass(int px,int py,int pw,int ph,int R,int sr,int ox,int oy,int amax){
+    int i,j, hx=pw/2, hy=ph/2, ix=hx-R, iy=hy-R, s2=sr*sr;
+    if(ix<0) ix=0; if(iy<0) iy=0; if(s2<1) s2=1;
+    for(j=-sr;j<ph+sr+oy;j++) for(i=-sr;i<pw+sr+ox;i++){
+        int ax=i-ox-hx, ay=j-oy-hy, qx,qy,dist,cov,t;
+        if(ax<0) ax=-ax; if(ay<0) ay=-ay;
+        qx=ax-ix; qy=ay-iy;
+        if(qx<0) qx=0; if(qy<0) qy=0;
+        dist = ui_isqrt(qx*qx+qy*qy) - R;
+        if(dist<=0) cov=amax;
+        else if(dist>=sr) continue;
+        else { t=sr-dist; cov = amax*t*t/s2; }
+        if(cov>0) ui_px(px+i, py+j, ui_rgb(0,0,0), cov);
     }
+}
+
+/* ★ v20: Material Design 式 **elevation 双层投影**。
+ * 单层投影(不管怎么调浓度/半径)在浅色底上总读成"一圈深描边" —— 用户原话"看起来有点怪"。
+ * Android/Material 的做法是两层叠:
+ *   · ambient: 紧、略深、几乎不偏移 —— 贴着形状给出"接触阴影"
+ *   · key light: 宽、很淡、明显向下偏 —— 给出"浮起来"的高度感
+ * 两层用 ui_px 的 max 覆盖度合成(近处取紧层, 远处取宽层), 正好是 elevation 的浓度曲线。
+ * 踩过的坑(别再犯):
+ *   ①矩形距离 -> 胶囊面板外露方框; ②平移整个"环" -> 面板与影之间裂 2~3px 缝(截图采样实锤)。*/
+static void ui_shadow(int px,int py,int pw,int ph,int R,int sr,int ox,int oy,int amax){
+    int tight = sr/4; if(tight<2) tight=2;
+    ui_shadow_pass(px,py,pw,ph,R, sr,    ox,   oy,        amax*3/5);   /* key light: 宽而淡 */
+    ui_shadow_pass(px,py,pw,ph,R, tight, 0,    (oy+2)/3,  amax);       /* ambient: 紧而略深, 水平不偏 */
 }
 
 /* ---------------- 抗锯齿数字(等宽) ---------------- */
@@ -114,6 +164,32 @@ static void ui_num_aa(int rx,int y,int v,u16_ c){   /* 右对齐到 2 位字段 
     int nd=(v>=10)?2:1, sx=rx+(2-nd)*FONT_CW;
     if(nd==2) ui_digit_aa(sx,y,(v/10)%10,c);
     ui_digit_aa(sx+(nd==2?FONT_CW:0),y,v%10,c);
+}
+
+/* ★ v20: 按百分比缩放的数字。字模是 23x28 的 8 位覆盖度位图, 缩小用**面积平均**
+ * (每个输出像素取源块的平均覆盖度), 比最近邻干净得多; pct>=100 时走原尺寸路径。*/
+static void ui_digit_s(int x,int y,int d,u16_ c,int pct){
+    const unsigned char *g; int ow,oh,gx,gy;
+    if(pct>=100){ ui_digit_aa(x,y,d,c); return; }
+    if(d<0||d>9) return;
+    g=FONT_DIG[d];
+    ow=FONT_CW*pct/100; oh=FONT_CH*pct/100;
+    if(ow<4||oh<4){ ui_digit_aa(x,y,d,c); return; }
+    for(gy=0;gy<oh;gy++){
+        int sy0=gy*FONT_CH/oh, sy1=(gy+1)*FONT_CH/oh; if(sy1<=sy0) sy1=sy0+1;
+        for(gx=0;gx<ow;gx++){
+            int sx0=gx*FONT_CW/ow, sx1=(gx+1)*FONT_CW/ow, sum=0,n=0,yy,xx;
+            if(sx1<=sx0) sx1=sx0+1;
+            for(yy=sy0;yy<sy1;yy++) for(xx=sx0;xx<sx1;xx++){ sum+=g[yy*FONT_CW+xx]; n++; }
+            if(n && sum) ui_px(x+gx,y+gy,c,sum/n);
+        }
+    }
+}
+static void ui_num_s(int rx,int y,int v,u16_ c,int pct){   /* 右对齐到 2 位字段 */
+    int cw=(pct>=100)?FONT_CW:(FONT_CW*pct/100);
+    int nd=(v>=10)?2:1, sx=rx+(2-nd)*cw;
+    if(nd==2) ui_digit_s(sx,y,(v/10)%10,c,pct);
+    ui_digit_s(sx+(nd==2?cw:0),y,v%10,c,pct);
 }
 
 /* ---------------- 比例文字(UTF-8 + 字形表) ---------------- */
@@ -174,20 +250,32 @@ static void ui_anchor(UIWidget *w,int SW,int SH){
 static void ui_render(UIWidget *w, int value){
     int i, W=w->w, H=w->h; ui_W=W; ui_H=H;
     if(W<1||H<1||W>UI_MAXW||H>UI_MAXH) return;          /* 防越界(审查 critical 兜底) */
-    for(i=0;i<W*H;i++){ ui_popbuf[i]=0; ui_cov[i]=0; }
-    int sh=w->shadow, px=sh, py=0, pw=W-sh, ph=H-sh;   /* 面板内缩留投影 */
-    if(sh>0) ui_shadow(px,py,pw,ph,w->radius,sh);
-    ui_round(px,py,pw,ph,w->radius,w->panel);
-    ui_px(px,py,w->panel,0);                            /* no-op 保持 W/H */
+    for(i=0;i<W*H;i++){ ui_popbuf[i]=0; ui_cov[i]=0; ui_al[i]=0; }
+    /* ★ v20: 投影改成【四边对称】。旧写法 px=sh,py=0,pw=W-sh,ph=H-sh 只在左边和下边留白,
+     * 面板整体偏右上, 屏上看就是"下面和左下漏一条浅带"(用户实拍到的那个)。
+     * 现在四边各留 sh; sh=0 时与旧行为完全一致。 */
+    int sh=w->shadow, px=sh, py=sh, pw=W-2*sh, ph=H-2*sh;
+    if(pw<8||ph<8){ px=0; py=0; pw=W; ph=H; sh=0; }     /* 参数离谱 -> 退回无投影 */
+    ui_cur_a = 255;                                     /* 投影: 靠 cov 表达浓淡 */
+    if(sh>0) ui_shadow(px,py,pw,ph,w->radius,sh,w->shadow_dx,w->shadow_dy,
+                       (w->shadow_a>0&&w->shadow_a<=255)?w->shadow_a:110);
+    ui_cur_a = (w->panel_alpha>0 && w->panel_alpha<=255) ? w->panel_alpha : 255;
+    { u16_ cbot = w->panel2 ? w->panel2 : w->panel;     /* panel2=底色 -> 竖向微渐变 */
+      ui_round_g(px,py,pw,ph,w->radius,w->panel,cbot); }
+    ui_cur_a = 255;                                     /* 面板之后的一切内容: 不透明 */
     /* 顶边细高光 */
     { int x; for(x=w->radius;x<pw-w->radius;x++) ui_px(px+x,py+1,ui_blend(w->panel,ui_rgb(80,90,105),120),200); }
 
     if(w->type==W_GAUGE){
         if(w->icon) ui_icon(w->icon,px+w->icon_x,py+w->icon_y,w->icon_color);
-        if(w->bar_w>0){ ui_fill(px+w->bar_x,py+w->bar_y,w->bar_w,w->bar_h,w->bar_track);
+        /* ★ v20: 进度条改圆角(半径=条高/2 -> 圆头), 比方头精致得多 */
+        if(w->bar_w>0){ int br=w->bar_h/2;
+            ui_round(px+w->bar_x,py+w->bar_y,w->bar_w,w->bar_h,br,w->bar_track);
             int mv=w->maxval>0?w->maxval:40, cv=value<0?0:(value>mv?mv:value), fw=w->bar_w*cv/mv;
-            if(fw>0) ui_fill(px+w->bar_x,py+w->bar_y,fw,w->bar_h,w->accent); }
-        if(w->has_num) ui_num_aa(px+w->num_x,py+w->num_y,value,w->fg);
+            if(cv>0 && fw<w->bar_h) fw=w->bar_h;         /* 太短时至少一个圆点, 不然是怪形状 */
+            if(fw>0) ui_round(px+w->bar_x,py+w->bar_y,fw,w->bar_h,br,w->accent); }
+        if(w->has_num) ui_num_s(px+w->num_x,py+w->num_y,value,w->fg,
+                                (w->num_scale>=20&&w->num_scale<=200)?w->num_scale:100);
     } else if(w->type==W_TOAST){
         if(w->icon) ui_icon(w->icon,px+16,py+(ph-16)/2,w->icon_color);
         ui_text(px+(w->icon?46:20), py+(ph-FONT_CH)/2+2, w->msg, w->fg, 0);
@@ -242,11 +330,12 @@ static int ui_anchorname(const char *s,const char *e){
 static void ui_defaults(UIWidget *w){
     int i; for(i=0;i<16;i++) w->name[i]=0; w->title[0]=0; w->msg[0]=0;
     w->valid=1; w->type=W_GAUGE; w->anchor=A_CENTER; w->bind=0; w->maxval=40; w->anim=0;
-    w->x=214; w->y=176; w->w=372; w->h=76; w->radius=18; w->shadow=10;
-    w->panel=ui_rgb(16,20,27); w->accent=ui_rgb(242,168,40); w->fg=ui_rgb(240,243,247);
+    w->x=214; w->y=176; w->w=372; w->h=76; w->radius=18; w->shadow=10; w->shadow_a=110; w->shadow_dx=2; w->shadow_dy=3;
+    w->panel=ui_rgb(16,20,27); w->panel2=0; w->accent=ui_rgb(242,168,40); w->fg=ui_rgb(240,243,247);
     w->alpha=248; w->fadein=160; w->hold=1400;   /* ms: 淡入160ms, 停留1.4s */
+    w->panel_alpha=255;                          /* 默认关闭硬件混合, 与 v19 行为一致 */
     w->bar_x=64; w->bar_y=36; w->bar_w=228; w->bar_h=12; w->bar_track=ui_rgb(51,58,68);
-    w->num_x=300; w->num_y=24; w->has_num=1;
+    w->num_x=300; w->num_y=24; w->has_num=1; w->num_scale=100;
     w->icon=1; w->icon_x=26; w->icon_y=30; w->icon_color=ui_rgb(204,210,218);
 }
 static int ui_parse(const char *txt,int len,UIWidget *w){
@@ -266,10 +355,15 @@ static int ui_parse(const char *txt,int len,UIWidget *w){
         if(ui_keq(ks,ke,"anchor")) w->anchor=ui_anchorname(vs,ve);
         else if(ui_keq(ks,ke,"x")) w->x=iv; else if(ui_keq(ks,ke,"y")) w->y=iv;
         else if(ui_keq(ks,ke,"w")) w->w=iv; else if(ui_keq(ks,ke,"h")) w->h=iv;
-        else if(ui_keq(ks,ke,"radius")) w->radius=iv; else if(ui_keq(ks,ke,"shadow")) w->shadow=iv;
+        else if(ui_keq(ks,ke,"radius")) w->radius=iv; else if(ui_keq(ks,ke,"shadow_a")) w->shadow_a=iv;
+        else if(ui_keq(ks,ke,"shadow_dx")) w->shadow_dx=iv;
+        else if(ui_keq(ks,ke,"shadow_dy")) w->shadow_dy=iv;
+        else if(ui_keq(ks,ke,"shadow")) w->shadow=iv;
+        else if(ui_keq(ks,ke,"panel_alpha")) w->panel_alpha=iv;
         else if(ui_keq(ks,ke,"alpha")) w->alpha=iv; else if(ui_keq(ks,ke,"fadein")) w->fadein=iv;
         else if(ui_keq(ks,ke,"hold")) w->hold=iv; else if(ui_keq(ks,ke,"anim")) w->anim=iv;
         else if(ui_keq(ks,ke,"maxval")) w->maxval=iv; else if(ui_keq(ks,ke,"bind")) w->bind=iv;
+        else if(ui_keq(ks,ke,"panel2")) w->panel2=ui_color(vs,ve);
         else if(ui_keq(ks,ke,"panel")) w->panel=ui_color(vs,ve);
         else if(ui_keq(ks,ke,"accent")) w->accent=ui_color(vs,ve);
         else if(ui_keq(ks,ke,"fg")) w->fg=ui_color(vs,ve);
@@ -282,6 +376,7 @@ static int ui_parse(const char *txt,int len,UIWidget *w){
         else if(ui_keq(ks,ke,"bar_w")) w->bar_w=iv; else if(ui_keq(ks,ke,"bar_h")) w->bar_h=iv;
         else if(ui_keq(ks,ke,"bar_track")) w->bar_track=ui_color(vs,ve);
         else if(ui_keq(ks,ke,"num")) w->has_num=iv;
+        else if(ui_keq(ks,ke,"num_scale")) w->num_scale=iv;
         else if(ui_keq(ks,ke,"num_x")) w->num_x=iv; else if(ui_keq(ks,ke,"num_y")) w->num_y=iv;
     }
     if(w->w<1)w->w=1; if(w->h<1)w->h=1;                 /* 下界 floor: 防负值越界(审查 critical) */

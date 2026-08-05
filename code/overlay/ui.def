@@ -1,13 +1,19 @@
-# 音量弹窗(gauge 类型)
+# 音量弹窗 —— Material Design 风格(参考 Android 音量弹层)
+# 平面纯色 surface(不做渐变) + 大圆角 + elevation 双层投影
 [gauge volume]
 anchor = center
-w = 372
-h = 76
-radius = 18
-shadow = 12
-panel = 12151c
+w = 404
+h = 108
+shadow = 16
+shadow_a = 70
+shadow_dx = 0
+shadow_dy = 6
+radius = 20
+panel = 1e232c
+panel2 = 1e232c
+panel_alpha = 240
 accent = f2a828
-fg = f0f3f7
+fg = f4f6fa
 alpha = 248
 fadein = 160
 hold = 1400
@@ -15,13 +21,14 @@ maxval = 40
 bind = 0
 icon = 1
 icon_x = 26
-icon_y = 24
-icon_color = ccd2da
+icon_y = 30
+icon_color = dfe5ec
 bar_x = 64
-bar_y = 26
+bar_y = 31
 bar_w = 228
-bar_h = 12
-bar_track = 333a44
+bar_h = 14
+bar_track = 3f4653
 num = 1
-num_x = 300
-num_y = 18
+num_scale = 80
+num_x = 310
+num_y = 27

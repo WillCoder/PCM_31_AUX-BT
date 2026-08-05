@@ -46,3 +46,7 @@ Full write-up: [`HW_overlay_framework.md`](../../HW_overlay_framework.md) ([简�
 
 Layout/colour changes only need the **348-byte `ui.def`** pushed over serial — the engine
 re-reads it every second. No recompile, no 66 KB binary transfer.
+
+## verify/
+
+Screenshot + diff tooling for checking the UI in software instead of by eye — see [verify/README.md](verify/README.md).
