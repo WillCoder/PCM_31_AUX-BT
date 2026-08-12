@@ -94,9 +94,11 @@ Six dead ends, each tested on real hardware, each with its exact cause: static f
 
 📄 Full document: **[volume-osd.md](volume-osd.md)** · [简体中文](volume-osd.zh-CN.md)
 
-![volume OSD drawn on our own hardware layer, over the stock Jukebox page](images/06-overlay-volume-osd.jpg)
+![the volume OSD on our own hardware layer, over the stock Bluetooth playback page](images/06-overlay-volume-osd.jpg)
 
-*Our own volume OSD, drawn on an independent Carmine hardware layer, sitting on top of the untouched stock UI. The stock page underneath keeps working normally — the progress bar advances, the clock ticks, the highlighted button stays highlighted. Nothing was flashed; the popup is pure runtime.*
+*Our own volume OSD, drawn on an independent Carmine hardware layer, sitting on top of the untouched stock Bluetooth playback page — in the car, not on the bench. The stock page underneath keeps working normally: the track title and artist are still scrolling, the 02:42 / 05:13 progress advances, the "Track order" button stays highlighted. Nothing was flashed; the popup is pure runtime.*
+
+*Shot 2026-08-06, while the panel was still translucent. The shipping configuration is now opaque (`panel_alpha = 255`) — see Trap 3 for what translucency costs.*
 
 ## How it works
 

@@ -8,10 +8,11 @@ with **no flash write at all**, no ghosting, and physical isolation from the sto
 Verified on the bench 2026-07-20: full colour, anti-aliased text, true rounded-corner
 transparency, the bar tracking the volume knob live, auto-dismiss.
 
-![volume OSD drawn on our own hardware layer, over the stock Jukebox page](images/06-overlay-volume-osd.jpg)
+![the volume OSD on our own hardware layer, over the stock Bluetooth playback page](images/06-overlay-volume-osd.jpg)
 
-*The stock page underneath keeps working normally — the progress bar advances, the clock
-ticks, the highlighted button stays highlighted. That coexistence is the entire point.*
+*In the car, over the untouched stock Bluetooth playback page. The stock page underneath keeps working normally — the track text scrolls, the 02:42 / 05:13 progress advances, the "Track order" button stays highlighted. That coexistence is the entire point.*
+
+*Shot 2026-08-06, while the panel was still translucent; the shipping configuration is now opaque (`panel_alpha = 255`) — see Trap 3.*
 
 | Part | What is in it |
 |---|---|
