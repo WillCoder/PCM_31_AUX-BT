@@ -61,7 +61,7 @@ One more trap worth knowing: `entertSourceChanged` forks on `main+0x944`. **Zero
 
 **Outcome**: stock + lock-BT + boot-sound in one clean firmware (all failed experiments removed) + zero-serial USB autorun — **flashed and confirmed on the bench and on the real car (911/9x1)**. Park, take the phone, come back, cold start, the phone reconnects: **the sound comes back on its own and Bluetooth stays selected. Zero manual operation.**
 
-📄 **Full journey — two chapters, every dead end and why: [journey_English.md](journey_English.md)** · 中文全过程见 [全过程_中文.md](全过程_中文.md)
+📄 **Full journey — two chapters, every dead end and why: [bluetooth-fix.md](bluetooth-fix.md)** · 中文全过程见 [bluetooth-fix.zh-CN.md](bluetooth-fix.zh-CN.md)
 
 ## What ships
 
@@ -69,15 +69,15 @@ One more trap worth knowing: `entertSourceChanged` forks on `main+0x944`. **Zero
 
 | | Location |
 |---|---|
-| **The solution** | [`code/build_shotgun_child_chain.py`](code/build_shotgun_child_chain.py) — the child-vtable cave with the self-derived `main` |
-| Its predecessor (kept as the reference baseline) | [`code/build_shotgun_child.py`](code/build_shotgun_child.py) — same cave, but with the hardcoded `main` that drifts |
-| Offline proof | [`code/validate_shotgun_child_chain.py`](code/validate_shotgun_child_chain.py) — runs the cave in `sh4emu` against the real `-2` connect-bug snapshot: it self-derives `main`, fires, and never faults (incl. deliberately corrupted pointers) |
-| Preflight gate | [`code/verify_ifs_flashable.py`](code/verify_ifs_flashable.py) |
+| **The solution** | [`code/bluetooth-fix/build_shotgun_child_chain.py`](code/bluetooth-fix/build_shotgun_child_chain.py) — the child-vtable cave with the self-derived `main` |
+| Its predecessor (kept as the reference baseline) | [`code/bluetooth-fix/build_shotgun_child.py`](code/bluetooth-fix/build_shotgun_child.py) — same cave, but with the hardcoded `main` that drifts |
+| Offline proof | [`code/bluetooth-fix/validate_shotgun_child_chain.py`](code/bluetooth-fix/validate_shotgun_child_chain.py) — runs the cave in `sh4emu` against the real `-2` connect-bug snapshot: it self-derives `main`, fires, and never faults (incl. deliberately corrupted pointers) |
+| Preflight gate | [`code/common/verify_ifs_flashable.py`](code/common/verify_ifs_flashable.py) |
 | Flashable firmware | **not included** — modified proprietary firmware; build your own from your dump with the tools in `code/` |
 
 ### Why the Bluetooth fix ships as a flash
 
-`/proc/<pid>/as` writes reach RW pages only and **fail on read-only code/rodata** — the CoW wall, proven on real hardware ([journey, Dead end ③](journey_English.md)). Both caves live in the RX segment, so **runtime code injection is not possible on this hardware**. The serial poke loop is how the fix was *found*; flashing IFS1 is how it *ships*.
+`/proc/<pid>/as` writes reach RW pages only and **fail on read-only code/rodata** — the CoW wall, proven on real hardware ([journey, Dead end ③](bluetooth-fix.md)). Both caves live in the RX segment, so **runtime code injection is not possible on this hardware**. The serial poke loop is how the fix was *found*; flashing IFS1 is how it *ships*.
 
 > Note: the bench (MOPF / `IFS_G1_E2`) and the car (`IFS_9X1`) ship **byte-identical `PCM3Root` binaries** — only the surrounding imagefs differs. So the car got the exact same proven binary. Locate `PCM3Root` through the **imagefs directory** (`mnt/ifs1/HBproject/PCM3Root`), never by searching for the ELF header — every SH4 executable in the image starts with the same bytes, and you *will* extract the wrong file.
 
@@ -112,7 +112,7 @@ Separate apps that run alongside the stock software. They **never write flash**,
   `gf_layer_update` must be preceded by a full re-assert** or it deadlocks in
   `gdcServerCarmine`; and an alpha plane's **byte stride must be 64-byte aligned** or the
   whole panel shears into diagonal bands.
-- Code: [`code/overlay/`](code/overlay/) · Full write-up: [`HW_overlay_framework.md`](HW_overlay_framework.md) ([简体中文](HW_overlay_framework.zh-CN.md))
+- Code: [`code/volume-osd/`](code/volume-osd/) · Full write-up: [`volume-osd.md`](volume-osd.md) ([简体中文](volume-osd.zh-CN.md))
 
 ---
 
@@ -122,8 +122,8 @@ Separate apps that run alongside the stock software. They **never write flash**,
 
 The 57600 root-shell development loop — push a binary, run it, pull the log, kill it, **without a USB stick and without reflashing**. Layout-only changes push 348 bytes instead of a 66 KB binary.
 
-- [`code/serial/`](code/serial/) — `ser_push.py` (chunked upload + cksum verify), `ser_pull.py`, `ser2.py` (run a command), `ser_kill.py`.
-- [`code/sh4tools/SERIAL_LOOP.md`](code/sh4tools/SERIAL_LOOP.md) — the `/proc/<pid>/as` poke loop this pairs with, and **what it can and cannot reach**.
+- [`code/common/serial/`](code/common/serial/) — `ser_push.py` (chunked upload + cksum verify), `ser_pull.py`, `ser2.py` (run a command), `ser_kill.py`.
+- [`code/common/sh4tools/SERIAL_LOOP.md`](code/common/sh4tools/SERIAL_LOOP.md) — the `/proc/<pid>/as` poke loop this pairs with, and **what it can and cannot reach**.
 
 ## Reverse-engineering + build
 
@@ -136,8 +136,8 @@ The 57600 root-shell development loop — push a binary, run it, pull the log, k
 
 ```
 README.md / README.zh-CN.md        this index
-journey_English.md / 全过程_中文.md  the Bluetooth fix, full story + every dead end
-HW_overlay_framework.md (+.zh-CN)  the overlay framework write-up
+bluetooth-fix.md / bluetooth-fix.zh-CN.md  the Bluetooth fix, full story + every dead end
+volume-osd.md (+.zh-CN)  the overlay framework write-up
 code/
   build_*.py, sh4emu.py, ...       the Bluetooth fix: assemblers, emulator, IFS pipeline
   overlay/                         HW-layer overlay framework

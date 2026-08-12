@@ -40,7 +40,7 @@ transparency, live volume tracking the knob, auto-dismiss.
    `gf_layer_disable` + update — so "hide" must be done by filling the visible area with
    `0x0000`, never by disabling the layer.
 
-Full write-up: [`HW_overlay_framework.md`](../../HW_overlay_framework.md) ([简体中文](../../HW_overlay_framework.zh-CN.md))
+Full write-up: [`volume-osd.md`](../../volume-osd.md) ([简体中文](../../volume-osd.zh-CN.md))
 
 ## Iterating
 

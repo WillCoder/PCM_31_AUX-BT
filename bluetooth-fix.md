@@ -24,7 +24,7 @@ They were not ordinary bricks — they **hit the watchdog**: after a bad image, 
 
 That blood bought the methodology under which **nothing has bricked since** — the reason every "flash succeeded, no brick" in this document holds:
 
-1. **Mandatory pre-flash preflight** (`code/verify_ifs_flashable.py`): the PCM3.1 IPL requires the **startup segment and the imagefs segment to each independently sum-to-zero** (early on I only zeroed the whole file → that broke the startup segment → the IPL rejects it → a major source of bricking). Any non-zero segment = never flash.
+1. **Mandatory pre-flash preflight** (`code/common/verify_ifs_flashable.py`): the PCM3.1 IPL requires the **startup segment and the imagefs segment to each independently sum-to-zero** (early on I only zeroed the whole file → that broke the startup segment → the IPL rejects it → a major source of bricking). Any non-zero segment = never flash.
 2. **Knowing which bricks are recoverable and which are not**: it was later proven that a brick that **stays stable and does not hit the watchdog** (stuck on the logo / dead USB port but a stable IPL) can be revived over a 57600 serial line — reach the emergency shell, start io-usb + devb-umass, mount the USB, `flashit` the stock image back; but a **watchdog endless-reboot brick cannot be saved** — so I would rather have the preflight block it than gamble.
 3. **FAT USB writes occasionally corrupt**: always cksum-verify after `cp` to the USB (during this very wrap-up a write did corrupt, cksum 3367337659 ≠ 4237630296, and was caught on the spot by run.sh's cksum gate).
 
@@ -175,14 +175,14 @@ objdump -D -b binary -m sh4 -EL --adjust-vma=0x08040000 \
 ```
 
 ### 5.2 sh4emu (an SH4 interpreter)
-`code/sh4emu.py` + `code/sh4_run_switch.py`. Actually **executes arbitrary PCM3Root functions** against a 16 MB memory snapshot of the real car / bench — offline dynamic validation (cures blind static-RE misreads, costs no flash). Every hand-written cave is validated here (transparency, gate logic, recursion safety) before flashing.
+`code/common/sh4emu.py` + `code/common/sh4_run_switch.py`. Actually **executes arbitrary PCM3Root functions** against a 16 MB memory snapshot of the real car / bench — offline dynamic validation (cures blind static-RE misreads, costs no flash). Every hand-written cave is validated here (transparency, gate logic, recursion safety) before flashing.
 
 ### 5.3 IFS build pipeline
-PCM3Root is per-file LZO-compressed inside the IFS1. `code/`: inflate → patch-file (exact-size replacement) → deflate (`--ref` preserves block shape + adds the outer sum-to-zero). **Preflight gate** `code/verify_ifs_flashable.py`: both the startup segment and the imagefs segment must each sum32le to 0 — **this is the very gate paid for by the two bricked benches in the Prologue**; any non-zero segment is never flashed. Every flash later in this document passes it first.
+PCM3Root is per-file LZO-compressed inside the IFS1. `code/`: inflate → patch-file (exact-size replacement) → deflate (`--ref` preserves block shape + adds the outer sum-to-zero). **Preflight gate** `code/common/verify_ifs_flashable.py`: both the startup segment and the imagefs segment must each sum32le to 0 — **this is the very gate paid for by the two bricked benches in the Prologue**; any non-zero segment is never flashed. Every flash later in this document passes it first.
 
 ### 5.4 Bench memory read/write
 - Read: over serial, `hd -s <addr> -n <len> /proc/12316/as` (PID is always 12316).
-- Write (RW only): `mp2` = `code/sh4tools/mempoke.c`, one byte per call.
+- Write (RW only): `mp2` = `code/common/sh4tools/mempoke.c`, one byte per call.
 
 ---
 
@@ -217,7 +217,7 @@ skip:
 
 **Confirmed on the bench**: main+0x94c=0 (fired once), child+0x68=40 (BT activated), source fields = BT, I heard sound.
 
-Tool: `code/build_shotgun_child.py` (assembler, adapted from the main-vtable `code/build_shotgun.py`: vtable = 0x085700e0 / 5 slots / hardcoded main).
+Tool: `code/bluetooth-fix/build_shotgun_child.py` (assembler, adapted from the main-vtable `code/bluetooth-fix/build_shotgun.py`: vtable = 0x085700e0 / 5 slots / hardcoded main).
 
 ---
 
@@ -375,16 +375,16 @@ Park. Take the phone. Come back. Cold start. The phone reconnects — **the musi
 
 ## Appendix: Key Files
 
-- `code/build_shotgun_child_chain.py` — **the solution**: child-vtable cave with the self-derived `main`
-- `code/validate_shotgun_child_chain.py` — sh4emu proof against the real `-2` snapshot (T1 fires / T2 safe / T3 no fault)
-- `code/build_shotgun_child.py` — its predecessor, kept as the reference baseline (hardcoded `main`)
-- `code/build_shotgun.py` — main-vtable version (diagnostic)
-- `code/build_auxkick_cave.py` — early AUX→BT cave template
-- `code/sh4emu.py` / `code/sh4_run_switch.py` — SH4 interpreter + source-switch harness
-- `code/verify_ifs_flashable.py` — pre-flash preflight gate
+- `code/bluetooth-fix/build_shotgun_child_chain.py` — **the solution**: child-vtable cave with the self-derived `main`
+- `code/bluetooth-fix/validate_shotgun_child_chain.py` — sh4emu proof against the real `-2` snapshot (T1 fires / T2 safe / T3 no fault)
+- `code/bluetooth-fix/build_shotgun_child.py` — its predecessor, kept as the reference baseline (hardcoded `main`)
+- `code/bluetooth-fix/build_shotgun.py` — main-vtable version (diagnostic)
+- `code/bluetooth-fix/build_auxkick_cave.py` — early AUX→BT cave template
+- `code/common/sh4emu.py` / `code/common/sh4_run_switch.py` — SH4 interpreter + source-switch harness
+- `code/common/verify_ifs_flashable.py` — pre-flash preflight gate
 - `code/{inflate,deflate}_ifs_lzo.py`, `patch_decomp_ifs_file.py` — IFS pipeline
 - Clean final firmware (cksum **4237630296**) — **not in this repo** (modified proprietary firmware); build your own with the tools above
-- USB autorun bundle — scripts in `code/autorun/`; the `.ifs` payload is **not included**
+- USB autorun bundle — scripts in `code/bluetooth-fix/autorun/`; the `.ifs` payload is **not included**
 
 ---
 

@@ -61,7 +61,7 @@ main = *(*(*(child + 0x38) + 0x08) + 0x70)
 
 **成果**:stock + 锁BT + 开机出声 合成一个干净固件(失败实验全清)+ USB autorun 零串口部署 —— **台架与真车(911/9x1)双双实刷确认**。熄火、带手机走、回来冷启动、手机重连:**声音自己回来,蓝牙保持不掉,全程零手动操作。**
 
-📄 **完整全过程(两章 · 含所有死路及原因):[全过程_中文.md](全过程_中文.md)** · English journey see [journey_English.md](journey_English.md)
+📄 **完整全过程(两章 · 含所有死路及原因):[bluetooth-fix.zh-CN.md](bluetooth-fix.zh-CN.md)** · English journey see [bluetooth-fix.md](bluetooth-fix.md)
 
 ## 交付的是什么
 
@@ -69,15 +69,15 @@ main = *(*(*(child + 0x38) + 0x08) + 0x70)
 
 | | 位置 |
 |---|---|
-| **解法** | [`code/build_shotgun_child_chain.py`](code/build_shotgun_child_chain.py) —— child-vtable cave,`main` 自派生 |
-| 它的前身(作为参照基线保留) | [`code/build_shotgun_child.py`](code/build_shotgun_child.py) —— 同一个 cave,但 `main` 写死会漂 |
-| 离线证明 | [`code/validate_shotgun_child_chain.py`](code/validate_shotgun_child_chain.py) —— 在 `sh4emu` 里对真实 `-2` 连接bug快照跑 cave:自派生 `main`、开火、且(含故意喂坏指针)绝不 fault |
-| 预检门 | [`code/verify_ifs_flashable.py`](code/verify_ifs_flashable.py) |
+| **解法** | [`code/bluetooth-fix/build_shotgun_child_chain.py`](code/bluetooth-fix/build_shotgun_child_chain.py) —— child-vtable cave,`main` 自派生 |
+| 它的前身(作为参照基线保留) | [`code/bluetooth-fix/build_shotgun_child.py`](code/bluetooth-fix/build_shotgun_child.py) —— 同一个 cave,但 `main` 写死会漂 |
+| 离线证明 | [`code/bluetooth-fix/validate_shotgun_child_chain.py`](code/bluetooth-fix/validate_shotgun_child_chain.py) —— 在 `sh4emu` 里对真实 `-2` 连接bug快照跑 cave:自派生 `main`、开火、且(含故意喂坏指针)绝不 fault |
+| 预检门 | [`code/common/verify_ifs_flashable.py`](code/common/verify_ifs_flashable.py) |
 | 可刷固件 | **不含**——改过的专有固件;用 `code/` 里的工具 + 你自己 dump 的固件自行构建 |
 
 ### 为什么蓝牙修复必须靠刷写
 
-`/proc/<pid>/as` 只写得进 RW 页,**写只读 code/rodata 会失败** —— 这就是 CoW 墙,真机实证([journey 的 Dead end ③](全过程_中文.md))。两个 cave 都在 RX 段,所以这硬件上**做不了运行时代码注入**。串口 poke 循环是**找到**修复的手段,刷 IFS1 才是**交付**它的手段。
+`/proc/<pid>/as` 只写得进 RW 页,**写只读 code/rodata 会失败** —— 这就是 CoW 墙,真机实证([journey 的 Dead end ③](bluetooth-fix.zh-CN.md))。两个 cave 都在 RX 段,所以这硬件上**做不了运行时代码注入**。串口 poke 循环是**找到**修复的手段,刷 IFS1 才是**交付**它的手段。
 
 > 注:台架(MOPF / `IFS_G1_E2`)和真车(`IFS_9X1`)的 `PCM3Root` **二进制字节完全相同**,只有周围的 imagefs 不同。所以真车进的就是台架上验过的那一份。定位 `PCM3Root` 要走 **imagefs 目录**(`mnt/ifs1/HBproject/PCM3Root`),**别用 ELF 头去搜**——镜像里每个 SH4 可执行文件开头都一样,你一定会抽错文件。
 
@@ -104,7 +104,7 @@ main = *(*(*(child + 0x38) + 0x08) + 0x70)
 - **各值一天的坑**:驱动把**层号反转**(`硬件层 = 7 − gf层`);像素格式是 **RGBA5551 而不是 API 报的 ARGB1555**;
   **每次 `gf_layer_update` 前必须完整重申**,否则永久死锁在 `gdcServerCarmine`;
   以及 alpha 平面的 **byte stride 必须 64 字节对齐**,否则整个面板会斜切成条纹。
-- 代码:[`code/overlay/`](code/overlay/) · 详细文档:[`HW_overlay_framework.zh-CN.md`](HW_overlay_framework.zh-CN.md)([English](HW_overlay_framework.md))
+- 代码:[`code/volume-osd/`](code/volume-osd/) · 详细文档:[`volume-osd.zh-CN.md`](volume-osd.zh-CN.md)([English](volume-osd.md))
 
 ---
 
@@ -114,8 +114,8 @@ main = *(*(*(child + 0x38) + 0x08) + 0x70)
 
 57600 root shell 开发闭环 —— 推二进制、跑、拉日志、杀掉,**不用插 U 盘、不用重刷**。只改布局的话推 348 字节就行,不必传 66 KB 二进制。
 
-- [`code/serial/`](code/serial/) —— `ser_push.py`(分块上传 + cksum 校验)、`ser_pull.py`、`ser2.py`(执行命令)、`ser_kill.py`。
-- [`code/sh4tools/SERIAL_LOOP.md`](code/sh4tools/SERIAL_LOOP.md) —— 与之配套的 `/proc/<pid>/as` poke 循环,以及**它够得着什么、够不着什么**。
+- [`code/common/serial/`](code/common/serial/) —— `ser_push.py`(分块上传 + cksum 校验)、`ser_pull.py`、`ser2.py`(执行命令)、`ser_kill.py`。
+- [`code/common/sh4tools/SERIAL_LOOP.md`](code/common/sh4tools/SERIAL_LOOP.md) —— 与之配套的 `/proc/<pid>/as` poke 循环,以及**它够得着什么、够不着什么**。
 
 ## 逆向 + 构建
 
@@ -128,8 +128,8 @@ main = *(*(*(child + 0x38) + 0x08) + 0x70)
 
 ```
 README.md / README.zh-CN.md         本索引
-journey_English.md / 全过程_中文.md   蓝牙修复完整故事 + 所有死路
-HW_overlay_framework.md (+.zh-CN)   overlay 框架详文
+bluetooth-fix.md / bluetooth-fix.zh-CN.md   蓝牙修复完整故事 + 所有死路
+volume-osd.md (+.zh-CN)   overlay 框架详文
 code/
   build_*.py, sh4emu.py, ...        蓝牙修复:汇编器、模拟器、IFS 管线
   overlay/                          硬件图层 overlay 框架

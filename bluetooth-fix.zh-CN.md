@@ -24,7 +24,7 @@
 
 这两台的血,换来了之后**再没砖过一台**的方法论——也是本文里每一次"刷写成功、没砖"的底气:
 
-1. **刷前强制预检**(`code/verify_ifs_flashable.py`):PCM3.1 的 IPL 要求 **startup 段和 imagefs 段各自独立 sum-to-zero**(早期只做整文件归零 → 破坏 startup 段 → IPL 拒 → 正是砖的一大根源)。任一段非零 = 绝不刷。
+1. **刷前强制预检**(`code/common/verify_ifs_flashable.py`):PCM3.1 的 IPL 要求 **startup 段和 imagefs 段各自独立 sum-to-zero**(早期只做整文件归零 → 破坏 startup 段 → IPL 拒 → 正是砖的一大根源)。任一段非零 = 绝不刷。
 2. **认清哪种砖能救、哪种救不了**:后来才证明,**能稳住、不撞看门狗**的那种砖(卡徽标 / USB 口不亮但 IPL 稳定)可以靠 57600 串口进 emergency shell、mount U 盘、flashit 刷回 stock 救活;但**撞看门狗无限重启的,救不了**——所以宁可预检拦下,绝不赌。
 3. **FAT 写盘偶发损坏**:cp 到 U 盘后必 cksum 核对(本文收尾时就真撞上一次写坏,cksum 3367337659 ≠ 4237630296,被 run.sh 的 cksum 门当场挡下)。
 
@@ -175,14 +175,14 @@ objdump -D -b binary -m sh4 -EL --adjust-vma=0x08040000 \
 ```
 
 ### 5.2 sh4emu(SH4 解释器)
-`code/sh4emu.py` + `code/sh4_run_switch.py`。在真车/台架 16MB 内存快照上**真执行 PCM3Root 任意函数**,离线动态验证(治盲静态 RE 认错、不费 flash)。每个手写 cave 都在这里验证透明性、门逻辑、防递归,再刷。
+`code/common/sh4emu.py` + `code/common/sh4_run_switch.py`。在真车/台架 16MB 内存快照上**真执行 PCM3Root 任意函数**,离线动态验证(治盲静态 RE 认错、不费 flash)。每个手写 cave 都在这里验证透明性、门逻辑、防递归,再刷。
 
 ### 5.3 IFS 构建管线
-PCM3Root 在 IFS1 里逐文件 LZO 压缩。`code/`:inflate → patch-file(同尺寸替换)→ deflate(--ref 保块形状 + 外层 sum-to-zero)。**预检门** `code/verify_ifs_flashable.py`:startup 段 + imagefs 段各 sum32le==0——**就是"前情"里砖掉两台台架换来的那道门**,任一段非零绝不刷。本文后面几次实刷都先过它。
+PCM3Root 在 IFS1 里逐文件 LZO 压缩。`code/`:inflate → patch-file(同尺寸替换)→ deflate(--ref 保块形状 + 外层 sum-to-zero)。**预检门** `code/common/verify_ifs_flashable.py`:startup 段 + imagefs 段各 sum32le==0——**就是"前情"里砖掉两台台架换来的那道门**,任一段非零绝不刷。本文后面几次实刷都先过它。
 
 ### 5.4 台架内存读写
 - 读:串口 `hd -s <addr> -n <len> /proc/12316/as`(PID 恒 12316)。
-- 写(仅 RW):`mp2` = `code/sh4tools/mempoke.c`,1 字节/次。
+- 写(仅 RW):`mp2` = `code/common/sh4tools/mempoke.c`,1 字节/次。
 
 ---
 
@@ -214,7 +214,7 @@ PCM3Root 在 IFS1 里逐文件 LZO 压缩。`code/`:inflate → patch-file(同�
 
 **实测确认**:main+0x94c=0(触发一次)、child+0x68=40(BT 激活)、源字段=BT、我听到了声音。
 
-工具:`code/build_shotgun_child.py`(汇编器,基于 `code/build_shotgun.py` 主版改:vtable=0x085700e0 / 5 槽 / main 硬编码)。
+工具:`code/bluetooth-fix/build_shotgun_child.py`(汇编器,基于 `code/bluetooth-fix/build_shotgun.py` 主版改:vtable=0x085700e0 / 5 槽 / main 硬编码)。
 
 ---
 
@@ -373,16 +373,16 @@ cave 的其余部分和 2026-07-08 那个已证的 shotgun **逐字节相同**:�
 
 ## 附:关键文件
 
-- `code/build_shotgun_child_chain.py` — **解法**:child-vtable cave,`main` 自派生
-- `code/validate_shotgun_child_chain.py` — sh4emu 对真 `-2` 快照的证明(T1开火 / T2安全 / T3不fault)
-- `code/build_shotgun_child.py` — 它的前身,作为参照基线保留(`main` 写死)
-- `code/build_shotgun.py` — 主 vtable 版(诊断用)
-- `code/build_auxkick_cave.py` — 早期 AUX→BT cave 模板
-- `code/sh4emu.py` / `code/sh4_run_switch.py` — SH4 解释器 + 源切换 harness
-- `code/verify_ifs_flashable.py` — 刷前预检门
+- `code/bluetooth-fix/build_shotgun_child_chain.py` — **解法**:child-vtable cave,`main` 自派生
+- `code/bluetooth-fix/validate_shotgun_child_chain.py` — sh4emu 对真 `-2` 快照的证明(T1开火 / T2安全 / T3不fault)
+- `code/bluetooth-fix/build_shotgun_child.py` — 它的前身,作为参照基线保留(`main` 写死)
+- `code/bluetooth-fix/build_shotgun.py` — 主 vtable 版(诊断用)
+- `code/bluetooth-fix/build_auxkick_cave.py` — 早期 AUX→BT cave 模板
+- `code/common/sh4emu.py` / `code/common/sh4_run_switch.py` — SH4 解释器 + 源切换 harness
+- `code/common/verify_ifs_flashable.py` — 刷前预检门
 - `code/{inflate,deflate}_ifs_lzo.py`, `patch_decomp_ifs_file.py` — IFS 管线
 - 干净最终固件(cksum **4237630296**)—— **不在本仓库**(改过的专有固件);用上面的工具自行构建
-- USB autorun 包 —— 脚本在 `code/autorun/`;`.ifs` 载荷**不包含**
+- USB autorun 包 —— 脚本在 `code/bluetooth-fix/autorun/`;`.ifs` 载荷**不包含**
 
 ---
 

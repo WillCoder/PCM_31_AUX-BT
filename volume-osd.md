@@ -3,7 +3,7 @@
 Draw your own popups — a volume OSD, toasts, dialogs — **on top of the stock PCM 3.1 UI**,
 with **no flash write at all**, no ghosting, and physical isolation from the stock UI.
 
-> **English** · [简体中文](HW_overlay_framework.zh-CN.md)
+> **English** · [简体中文](volume-osd.zh-CN.md)
 
 Verified on the bench 2026-07-20: full colour, anti-aliased text, true rounded-corner
 transparency, the bar tracking the volume knob live, auto-dismiss.
@@ -183,7 +183,7 @@ and the anti-aliased corners; you keep the parking sensors. Our USB bundle build
 to package a `ui.def` that says anything else, and that guard has been tested by
 deliberately feeding it a bad value.
 
-The probe is `code/sh4tools/alphatab.c` — read-only, ~4.8 KB, prints the whole table plus a
+The probe is `code/common/sh4tools/alphatab.c` — read-only, ~4.8 KB, prints the whole table plus a
 `SANITY=OK/BAD` line that catches a wrong base address instead of quietly returning noise.
 
 ### 2.4 ★★★ Deadlock rule: every `gf_layer_update` needs a full re-assert first
@@ -374,7 +374,7 @@ after the layer is off. Clear the alpha plane too.
 ## 3. Code layout
 
 ```
-code/overlay/
+code/volume-osd/
   coexist_pop.c    the engine (layer setup, hot reload, live volume, show/hide)
   ui_core.c        shared renderer + ui.def parser — the same file the Mac previewer uses
   ui_font.h        offline-baked font (digits + proportional, incl. CJK)
@@ -450,7 +450,7 @@ The data source that makes the bar track the knob. **Taken verbatim from `coexis
 v37, which was already proven on the bench — not one constant was changed.**
 
 > `coexist_vol.c` was the standalone volume-OSD predecessor; it is **not shipped in this
-> repo** — `code/overlay/coexist_pop.c` supersedes it. It is named here only to record
+> repo** — `code/volume-osd/coexist_pop.c` supersedes it. It is named here only to record
 > where these constants came from and that they were not re-derived.
 
 ```
@@ -490,23 +490,23 @@ scan range `0x0866e200 – 0x08a00000`, 64 KB at a time.
 
 ```bash
 # Build (the script aborts on `error:` instead of leaving a stale binary to fool you)
-bash code/overlay/build.sh code/overlay/coexist_pop.c code/overlay/coexist_pop
+bash code/volume-osd/build.sh code/volume-osd/coexist_pop.c code/volume-osd/coexist_pop
 
 # Push (~97 s for 66 KB), verifies cksum automatically
-python3 code/serial/ser_push.py code/overlay/coexist_pop.stripped /tmp/coexist_pop 192
+python3 code/common/serial/ser_push.py code/volume-osd/coexist_pop.stripped /tmp/coexist_pop 192
 
 # Launch — all three redirections are mandatory (see below)
-python3 code/serial/ser2.py 'chmod 755 /tmp/coexist_pop; /tmp/coexist_pop </dev/null >/dev/null 2>/dev/null &'
+python3 code/common/serial/ser2.py 'chmod 755 /tmp/coexist_pop; /tmp/coexist_pop </dev/null >/dev/null 2>/dev/null &'
 
 # Pull the log
-python3 code/serial/ser_pull.py /tmp/pop.txt pop.txt
+python3 code/common/serial/ser_pull.py /tmp/pop.txt pop.txt
 
 # Layout/colour only: push 348 bytes, no recompile
-python3 code/serial/ser_push.py code/overlay/ui.def /tmp/ui.def 192
+python3 code/common/serial/ser_push.py code/volume-osd/ui.def /tmp/ui.def 192
 
 # Force a displayed value (to test rendering); delete the file to return to live volume
-python3 code/serial/ser2.py 'echo 30 > /tmp/uival'
-python3 code/serial/ser2.py 'rm -f /tmp/uival'
+python3 code/common/serial/ser2.py 'echo 30 > /tmp/uival'
+python3 code/common/serial/ser2.py 'rm -f /tmp/uival'
 ```
 
 ### Serial-specific traps

@@ -2,7 +2,7 @@
 
 在原厂 UI 之上叠加自绘弹窗(音量 OSD、提示、对话框),**零刷 flash、零残影、与原厂 UI 物理隔离**。
 
-> [English](HW_overlay_framework.md) · **简体中文**
+> [English](volume-osd.md) · **简体中文**
 
 ![音量 OSD 画在独立硬件图层上](images/06-overlay-volume-osd.jpg)
 
@@ -154,7 +154,7 @@ set_surfaces → set_blending → set_src_viewport → set_dst_viewport
 换回来的是倒车雷达。我们的 U 盘打包器会**拒绝**打包 `panel_alpha` 不是 255 的 `ui.def`,
 这道守卫是故意喂坏值验证过会拦下来的。
 
-探针是 `code/sh4tools/alphatab.c` —— 只读,约 4.8 KB,打印整张表,并附一行
+探针是 `code/common/sh4tools/alphatab.c` —— 只读,约 4.8 KB,打印整张表,并附一行
 `SANITY=OK/BAD` 用来在基址不对时**直接报错**,而不是安静地返回一堆看着像数据的噪声。
 
 ### 2.4 ★★★ 死锁铁律:`gf_layer_update` 前必须走完整重申序列
@@ -300,7 +300,7 @@ clear_rgb(); clear_alpha();/* 此时清什么都不会被扫出来           */
 ## 3. 代码结构
 
 ```
-code/overlay/
+code/volume-osd/
   coexist_pop.c    弹窗引擎(本框架的主程序)
   ui_core.c        共享渲染核心 + ui.def 解析器 —— 与 Mac 预览器同一份
   ui_font.h        离线烤的字库(数字 + 比例字体, 含汉字)
@@ -395,23 +395,23 @@ src = u32@(P+0x74) ∈ {34,35}             → 铃声, 要丢掉
 
 ```bash
 # 编译(脚本会在检测到 error: 时中止, 不会留旧二进制骗你)
-bash code/overlay/build.sh code/overlay/coexist_pop.c code/overlay/coexist_pop
+bash code/volume-osd/build.sh code/volume-osd/coexist_pop.c code/volume-osd/coexist_pop
 
 # 推送(~97 秒 / 66KB), 自动比对 cksum
-python3 code/serial/ser_push.py code/overlay/coexist_pop.stripped /tmp/coexist_pop 192
+python3 code/common/serial/ser_push.py code/volume-osd/coexist_pop.stripped /tmp/coexist_pop 192
 
 # 起进程 —— 三个重定向一个都不能少(见下)
-python3 code/serial/ser2.py 'chmod 755 /tmp/coexist_pop; /tmp/coexist_pop </dev/null >/dev/null 2>/dev/null &'
+python3 code/common/serial/ser2.py 'chmod 755 /tmp/coexist_pop; /tmp/coexist_pop </dev/null >/dev/null 2>/dev/null &'
 
 # 拉日志
-python3 code/serial/ser_pull.py /tmp/pop.txt pop.txt
+python3 code/common/serial/ser_pull.py /tmp/pop.txt pop.txt
 
 # 只改布局/配色: 推 348 字节即可, 不用重编重推
-python3 code/serial/ser_push.py code/overlay/ui.def /tmp/ui.def 192
+python3 code/common/serial/ser_push.py code/volume-osd/ui.def /tmp/ui.def 192
 
 # 手动指定显示值(测渲染), 删掉文件回到活体音量
-python3 code/serial/ser2.py 'echo 30 > /tmp/uival'
-python3 code/serial/ser2.py 'rm -f /tmp/uival'
+python3 code/common/serial/ser2.py 'echo 30 > /tmp/uival'
+python3 code/common/serial/ser2.py 'rm -f /tmp/uival'
 ```
 
 ### 串口相关的坑
@@ -425,7 +425,7 @@ python3 code/serial/ser2.py 'rm -f /tmp/uival'
 
 3. **台架 grep 不支持 `|` 或运算**(`grep -i "a\|b"` 静默返回空)。要么分开 grep,要么 `grep -E`。曾害我误判"图形栈没起来"。
 
-4. 台架**没有** `dd` / `cp` / `head` / `wc` / `touch`;`slay` 是交互式的(`-f` 也不管用),用 `code/serial/ser_kill.py` 自动应答。
+4. 台架**没有** `dd` / `cp` / `head` / `wc` / `touch`;`slay` 是交互式的(`-f` 也不管用),用 `code/common/serial/ser_kill.py` 自动应答。
 
 ---
 
