@@ -1,5 +1,12 @@
 # PCM_31_AUX-BT — Porsche PCM3.1 Bluetooth Audio Fix, The Full Journey
 
+| Part | What you will find there |
+|---|---|
+| [Part I — How it works](#part-i--how-it-works) | The stock system, the hardware facts, and the two root causes |
+| [Part II — The solution](#part-ii--the-solution) | fmguard, the child-vtable shotgun, the self-derived `main`, the clean firmware, the real car |
+| [Part III — Problems and dead ends](#part-iii--problems-and-dead-ends) | The journey in chronological order: symptoms, every dead end, the traps, the lessons |
+| [Appendix](#appendix) | Key addresses, key files, acknowledgments |
+
 > Porsche PCM3.1 head unit (CHN/MOPF variant, bench unit). QNX 6.3.x + SH-4A (SuperH, little-endian).
 > This document records **an entire chain of real pain I lived through**, not a single bug. It starts from the most annoying everyday symptom, digs all the way down to SH4 disassembly and memory injection, and ends in one clean firmware — with two bricked bench units paid as tuition along the way.
 
@@ -7,80 +14,17 @@
 *The live working bench: PCM3.1 booted and running FM; bottom-right is a K-CUT USB-to-serial adapter (green LED on); the red/black/green jumpers are the 57600 serial line; the MacBook shows this project's task list.*
 
 **The story in two chapters:**
-- **Part 1** (the earliest, most annoying pain): playing Bluetooth, turn the car off; next time I get in, the head unit **always reverts to FM** and I have to manually switch back to Bluetooth audio. → Fixed by **lock-BT (fmguard)** (2026-07-06, confirmed by flashing on both the bench and the real car 911/9x1).
-- **Part 2** (a new problem that surfaced once BT was locked): with Bluetooth held connected at boot, the phone connects **but there is no sound and no track name** — I have to manually do one AUX→BT to get sound. → Fixed by the **child-vtable shotgun** (2026-07-08, the main deep-dive of this document).
+- **Chapter 1** (the earliest, most annoying pain): playing Bluetooth, turn the car off; next time I get in, the head unit **always reverts to FM** and I have to manually switch back to Bluetooth audio. → Fixed by **lock-BT (fmguard)** (2026-07-06, confirmed by flashing on both the bench and the real car 911/9x1).
+- **Chapter 2** (a new problem that surfaced once BT was locked): with Bluetooth held connected at boot, the phone connects **but there is no sound and no track name** — I have to manually do one AUX→BT to get sound. → Fixed by the **child-vtable shotgun** (2026-07-08, the main deep-dive of this document).
 - Finally the two fixes are **combined into one clean firmware** (stock + lock-BT + boot-sound), deployed via a zero-serial USB autorun.
 
 ---
 
-# Prologue: Two Bricked Benches (why I am so careful about flashing)
+## Part I — How it works
 
-Before any of this, I had already **bricked two bench units in early flashing experiments — and could not recover them.**
+This part collects the knowledge you need before any of the fix makes sense: how the stock audio-source machinery is layered, and the two root causes behind the two symptoms. It states conclusions only — the hardware sessions that produced them are in Part III.
 
-They were not ordinary bricks — they **hit the watchdog**: after a bad image, the firmware fails to start, the watchdog times out and resets, and the unit **reboots endlessly**, resetting too fast to ever hold the IPL's emergency shell — no chance to reflash. Both units were dead for good, disassembled and scrapped.
-
-![The bricked-bench graveyard: several disassembled PCM3.1 units](images/05-bench-graveyard.jpg)
-*The cost: disassembled, scrapped bench units — metal chassis, the CD/DVD mechanism, main boards, and cooling fans scattered on the floor. A watchdog-driven endless-reboot brick cannot be recovered.*
-
-That blood bought the methodology under which **nothing has bricked since** — the reason every "flash succeeded, no brick" in this document holds:
-
-1. **Mandatory pre-flash preflight** (`code/common/verify_ifs_flashable.py`): the PCM3.1 IPL requires the **startup segment and the imagefs segment to each independently sum-to-zero** (early on I only zeroed the whole file → that broke the startup segment → the IPL rejects it → a major source of bricking). Any non-zero segment = never flash.
-2. **Knowing which bricks are recoverable and which are not**: it was later proven that a brick that **stays stable and does not hit the watchdog** (stuck on the logo / dead USB port but a stable IPL) can be revived over a 57600 serial line — reach the emergency shell, start io-usb + devb-umass, mount the USB, `flashit` the stock image back; but a **watchdog endless-reboot brick cannot be saved** — so I would rather have the preflight block it than gamble.
-3. **FAT USB writes occasionally corrupt**: always cksum-verify after `cp` to the USB (during this very wrap-up a write did corrupt, cksum 3367337659 ≠ 4237630296, and was caught on the spot by run.sh's cksum gate).
-
-![Debug / recovery setup: K-CUT serial + USB hub + the MacBook](images/02-bench-serial-debug.jpg)
-*My debug/recovery setup today: the K-CUT USB-to-serial (green LED) goes through a USB hub to the MacBook; the red/black/green jumpers are the 57600 serial TX/RX/GND — this serial line is the lifeline that can recover a "stable" brick.*
-
-![A replacement bench unit boxed, a](images/03-bench-boxed-a.jpg)
-![A replacement bench unit boxed, b](images/04-bench-boxed-b.jpg)
-*Replacement units procured after the two were bricked — only then could the project continue.*
-
-> Keep this in mind — **watchdog endless-reboot = unrecoverable**. Throughout Parts 1 and 2 below, every flash was pressed only after passing the preflight and leaving the serial-recovery option open.
-
----
-
-# Part 1: The Original Pain — Reverts to FM Every Time (lock-BT)
-
-## 1.1 My original problem
-
-Playing Bluetooth, turn the car off; next time I get in, the head unit **automatically reverts to the FM radio** every single time, and I have to dig into the menu to switch back to Bluetooth audio — **every single trip**. This was the starting point of the entire project.
-
-## 1.2 The investigation (this chapter had its own dead ends)
-
-- **First theory: an "A2DP→FM fallback master gate"** (0x082a4156): the belief that boot ran this code and forced the source back to FM. **Disproven**: that code is **dead** for boot — CPOnOffPresCtrl decides "not MME" and bypasses it entirely, so it never runs.
-- **The LastMode theory**: on power-off, the head unit saves LastMode = 10 (Default) rather than 7 (BT); at boot, CPOnOffPresCtrl reads 10 → "not MME" → falls to FM. A "Solution D = read-side remap 10 → 7" was drafted.
-- **Flashing A+B on the bench → still reverts to FM**: this flash was the turning point — it **proved that the Publishing/fallback layer is dead code for boot**, and that the real decision happens in the runtime **source-arbitration funnel** (inside CPSoundPresCtrl), not in the OnOff/fallback layer. It corrected a long-standing "patching the wrong layer" mistake (the same lesson Issue-1 would later lean on: **reproduce on live hardware, don't reason statically**).
-
-## 1.3 Root cause + fix: fmguard (a source-arbitration guard)
-
-The effective point is the runtime source arbitration: at boot (and when the phone disconnects), FM gets submitted as the source and displaces Bluetooth. **fmguard = an 18-byte cave**, hung on the arbitration pool slot **0x082ac898** (repointed to the cave) with the cave body at 0x083f2908~2918: **when the source being submitted is FM, don't submit it** — so FM can no longer auto-seize the source at boot/disconnect, and Bluetooth holds. Manual source switching is unaffected.
-
-## 1.4 Confirmation
-
-- **Flashed on the bench** and **flashed on the real car (911/9x1)**, both confirmed: disconnecting the phone / restarting the car **no longer drops back to FM**; Bluetooth holds.
-- This is the origin of the **`lock-BT`** half of the clean firmware in this document.
-
-> But once Bluetooth was locked, a subtler problem surfaced — **with Bluetooth held connected at boot, there is no sound**. That is Part 2.
-
----
-
-# Part 2: BT Held, But Silent (Issue-1)
-
-## 1. The Problem (Issue-1)
-
-**Symptom**: When Bluetooth is held connected across a boot, the phone connects — the screen shows the "Bluetooth connected" popup and the phone name — **but there is no sound and no track name**.
-
-**Two key clues I noticed** (which turned out to be the keys to the whole case):
-
-1. **Only a genuine source-CHANGE restores sound**: In the bug state (silent), manually switching to **AUX and then back to Bluetooth (AUX→BT)** restores sound; but **re-selecting Bluetooth (BT→BT) does not**. So audio activation only fires on a real "source change."
-
-2. **A precondition that exists only after being used once**: In the normal (sound-on) state, disconnecting the phone (the page holds, doesn't drop to FM) and reconnecting **recovers playback**; but in the bug state, reconnecting does **not** recover. So there is some state that is not established at boot but is present once the source has been used once.
-
-**Goal**: Make Bluetooth auto-play with sound at boot (equivalent to automatically doing one AUX→BT).
-
----
-
-## 2. System Background
+### System Background
 
 - **Audio-source control architecture** (three layers):
   - L1 App layer: source enum (7=A2DP/BT, 11=FM, 24=AUX, …)
@@ -90,9 +34,11 @@ The effective point is the runtime source arbitration: at boot (and when the pho
 - **Amplifier**: type is decided by an empty marker file `/HBpersistence/audioAmp{ASK,BOSE,BURMESTER}`. The bench has no physical amp, so an `audioAmpASK` (built-in) marker must exist for the asynchronous TLAM handshake of a source switch to complete and produce sound.
 - **Bench vs. real car**: bench = Panamera (G1 hardware board); real car = 911 (9x1). Software cannot turn one into the other (hardware self-reports). This fix targets the bench MOPF binary.
 
----
+### Root cause (lock-BT): the source-arbitration funnel
 
-## 3. Root Cause (decompile + live bench + sh4emu all agree)
+The effective point is the runtime source arbitration: at boot (and when the phone disconnects), FM gets submitted as the source and displaces Bluetooth.
+
+### Root Cause (decompile + live bench + sh4emu all agree)
 
 **At boot, BT is set as the source but audio focus is never requested (`requestRequestAudioFocus`).** The chain:
 
@@ -116,77 +62,20 @@ establishment FUN_082a4e8c:
 
 ---
 
-## 4. The Investigation (every dead end, with the exact reason it failed)
+## Part II — The solution
 
-> This section is the core value of the document — every dead end was tested on real hardware, each with its exact cause. **Do not walk these again.**
+This part states what shipped and why it works: the fmguard cave for lock-BT, the child-vtable shotgun for boot sound, the self-derived `main` that made the shotgun safe, the tooling that built and proved them, the combined clean firmware, and the real-car deployment. The attempts that did not survive are in Part III.
 
-### Dead end ① Static field writes (mp2 writing heap directly)
-Using mp2, I wrote all 6 fields that AUX→BT changes (`CHILD+0x68 -2→40` connected source, `CHILD+0x6c`, `MAIN+0x864`, `MAIN+0x86c`, `MAIN+0x94c`, `CHILD+0xc4` media cursor) to their normal-state values.
-**Result: no sound.** And across disconnect + reconnect the fields **held** and it was still silent — hard proof.
-**Reason**: those 6 fields are **results, not causes** of AUX→BT. The actual sound is a **side effect of the establishment commanding the DSP**; static field writes cannot reproduce it.
+### fmguard (a source-arbitration guard)
 
-### Dead end ② Hooking vtable +0x44
-I assumed the source-change was at main-object vtable +0x44 (0x082a7b40 = processCurrentEntertainmentSource). I built a cave replicating AUX→BT and flashed it.
-**Result: never fired.** After BT connects at boot, +0x44 is simply not called.
-**Reason**: wrong slot — the source-change is actually at **+0x34** (0x082a4854), and the connect event does not go through the main vtable at all (see dead end ⑥).
+**fmguard = an 18-byte cave**, hung on the arbitration pool slot **0x082ac898** (repointed to the cave) with the cave body at 0x083f2908~2918: **when the source being submitted is FM, don't submit it** — so FM can no longer auto-seize the source at boot/disconnect, and Bluetooth holds. Manual source switching is unaffected.
 
-### Dead end ③ Runtime code injection (no flash)
-I tried injecting the cave directly into the running process memory to avoid a flash.
-**Result: `ERR write failed`.**
-**Reason: the CoW wall (proven on real HW)**. mp2 (via /proc lseek+write) can write RW pages (.data/heap) but **fails on read-only code/rodata pages**. The bench also has no gdb/pdebug. So the cave can only go into flash, never a runtime injection.
+### Confirmation
 
-### Dead end ④ Precise patch via Ghidra decompilation
-I tried to patch the getter/establishment surgically.
-**Result: couldn't proceed safely.**
-**Reason: Ghidra's decompilation is unreliable** for this binary — function entry addresses are systematically misaligned (the real source-change entry is 0x082a4854, not the decompiler name 0x082a4838 — the first 28 bytes are data/a jump table); pool labels are wrong (a "pointer to the getter" actually pointed to a string). **Had to switch to a reliable tool** (objdump, §5).
+- **Flashed on the bench** and **flashed on the real car (911/9x1)**, both confirmed: disconnecting the phone / restarting the car **no longer drops back to FM**; Bluetooth holds.
+- This is the origin of the **`lock-BT`** half of the clean firmware in this document.
 
-### Dead end ⑤ vtrace dynamic instrumentation (log which method fires)
-Plan: instrument all 20 main-vtable slots, each logging to a .data ring buffer; after connect, read the buffer to see which method fired.
-**Result: nowhere to put the buffer.**
-**Reason**: the entire .data segment is used at runtime by the program ("all zeros in the IFS" is an illusion — .data is filled at runtime), so there is no dead buffer region; and the system logger requires a complex context object that is too heavy to replicate in a cave.
-**Turning point**: switch to the shotgun approach (below), using an existing field `main+0x94c` as the gate — no buffer needed.
-
-### Dead end ⑥ Main-vtable shotgun (instrument all + gate, fix directly)
-Instead of "locate then fix," instrument all 20 main-vtable methods, each gated (if in the bug state, trigger AUX→BT). Whichever one is called triggers the fix — bypassing the localization problem.
-**Result: after BT connects at boot, main+0x94c stayed 1 = none of them fired.**
-**But this was a valuable diagnostic**: doing a manual AUX→BT flipped main+0x94c to 0 = the main vtable IS exercised by the source-change path = **the shotgun mechanism works**.
-**Conclusion**: **the connect handler is NOT in the main vtable.** The connect path and the source-change path are two independent code paths, and the connect does not trigger the main source-change — which is exactly the bug.
-
-### ✅ Success ⑦ Child-vtable shotgun
-Since the connect goes through the child (SourceSinkSupervisor) object (it modified `CHILD+0xc4`, the media cursor, on connect), **instrument the child's vtable**.
-**Result: success!** At boot, holding BT → it connects → one of the child's vtable methods is called (in the bug state) → the gate passes → forced AUX→BT → the establishment activates → **sound**.
-
----
-
-## 5. Tooling Breakthroughs (reusable going forward)
-
-### 5.1 Reliable SH4 disassembly = Debian binutils-multiarch objdump
-capstone garbles SH4 and Ghidra misaligns functions — only GNU objdump (2.35+, with SH support) is ground truth, and it even resolves pool values and string addresses.
-```bash
-# Build the image (once)
-docker build --platform linux/386 -t sh4gdb:latest - <<'EOF'
-FROM debian:bullseye-slim
-RUN apt-get update -qq && apt-get install -y -qq libncurses5 binutils-multiarch
-EOF
-# Prep: carve PCM3Root's LOAD1 segment (vaddr 0x08040000) to raw text.bin
-# Disassemble (--adjust-vma maps fileoff 0 → 0x08040000)
-objdump -D -b binary -m sh4 -EL --adjust-vma=0x08040000 \
-  --start-address=0x082a4854 --stop-address=0x082a4900 text.bin
-```
-
-### 5.2 sh4emu (an SH4 interpreter)
-`code/common/sh4emu.py` + `code/common/sh4_run_switch.py`. Actually **executes arbitrary PCM3Root functions** against a 16 MB memory snapshot of the real car / bench — offline dynamic validation (cures blind static-RE misreads, costs no flash). Every hand-written cave is validated here (transparency, gate logic, recursion safety) before flashing.
-
-### 5.3 IFS build pipeline
-PCM3Root is per-file LZO-compressed inside the IFS1. `code/`: inflate → patch-file (exact-size replacement) → deflate (`--ref` preserves block shape + adds the outer sum-to-zero). **Preflight gate** `code/common/verify_ifs_flashable.py`: both the startup segment and the imagefs segment must each sum32le to 0 — **this is the very gate paid for by the two bricked benches in the Prologue**; any non-zero segment is never flashed. Every flash later in this document passes it first.
-
-### 5.4 Bench memory read/write
-- Read: over serial, `hd -s <addr> -n <len> /proc/12316/as` (PID is always 12316).
-- Write (RW only): `mp2` = `code/common/sh4tools/mempoke.c`, one byte per call.
-
----
-
-## 6. The Solution: child-vtable shotgun
+### The Solution: child-vtable shotgun
 
 **Core idea**: do not locate "which specific method is the connect handler" (too hard); instead **instrument all 5 child-vtable methods and gate each** — whichever one is called in the bug state triggers one fix. Broad instrumentation bypasses the localization problem.
 
@@ -195,7 +84,7 @@ PCM3Root is per-file LZO-compressed inside the IFS1. `code/`: inflate → patch-
 ```
 shared routine (r0 = original method, r4 = child):
   save r4-r7 / r0 / r14 / pr        ; transparent: preserve the original method's args
-  r14 = 0x086ed694                  ; hardcoded main  ← THIS IS THE FLAW (see §10):
+  r14 = 0x086ed694                  ; hardcoded main  ← THIS IS THE FLAW (see "The Last Mile" in Part III):
                                     ; believed fixed at the time, it actually drifts
                                     ; every boot. The final cave derives it instead.
   child = *(main+0x1f0)
@@ -219,104 +108,7 @@ skip:
 
 Tool: `code/bluetooth-fix/build_shotgun_child.py` (assembler, adapted from the main-vtable `code/bluetooth-fix/build_shotgun.py`: vtable = 0x085700e0 / 5 slots / hardcoded main).
 
----
-
-## 7. The Clean Final Firmware + USB autorun
-
-### Composition
-I wanted a clean version that keeps only the effective changes. Diffing the proven fmguard.ifs confirmed that lock-BT needs only 4 patches. So the clean firmware =
-
-```
-stock PCM3Root
-  + fmguard (lock-BT, doesn't drop to FM on disconnect): pool slot 0x082ac898 → cave 0x083f2908~2918
-  + child-shotgun (boot sound): 5 child-vtable slots + cave 0x0856484c
-```
-
-**Failed experiments removed**: `0x082a4147` (skip-a2dp, long proven to be boot dead code) and `0x082b65e0` (the desiredApp lever) — the diff confirmed neither belongs to lock-BT, so they are safe to remove.
-
-> ⚠️ **`0x082b65e0` is not merely unproven — it was measured dead on the real car (2026-06-22).** The running `PCM3Root` already read `0x07` there (signature `02 8D 05 1E 07 E1 15 1E`, persisted from an earlier flash) and the car **still booted to FM**. The same session found `0x821694e` (force-MME) also already applied — same result. Two independent reasons it cannot work:
->
-> 1. **What gets stored was never 7.** LastMode persists as **10 (Default)**, so remapping `mov #1` → `mov #7` retargets a value the persistence layer doesn't produce in this case.
-> 2. **The boot path never executes that function.** `0x82b65e0` sits in the LastMode *persistence handler* (`FUN_0x82b6538`). The boot decision is `CPOnOffPresCtrl @0x8216940` — `mov #9,r1 / cmp/hi r1,r6` with source 10, so `bt.s` takes the `>9` shortcut and `bra`s straight to the non-MME path. `0x82b65e0` is never reached.
->
-> The deeper point, which is why this whole family of patches fails: **the boot decision is correct given what exists at the time** — A2DP isn't up yet, so it falls to the always-available FM — and nothing re-evaluates when the phone connects seconds later. A working fix has to ride the **connect** event, which is exactly what the child-vtable shotgun does.
-
-Clean IFS: `PCM3_IFS1_MOPF.CHN.clean.ifs`, cksum **4237630296**, size 10230208.
-
-### USB autorun (zero-serial deployment)
-Bundle = `copie_scr.sh` (the trigger, XOR-encoded, seed 0x001BE3AC) + `run.sh` (cksum gate + ARM gate + `flashit -v` + one-shot ARM deletion on success + logging) + `ARM_FLASH_CLEAN_BT_FIX.txt` (armed) + `payload/clean.ifs`.
-
-**Timing is critical**: the USB must be inserted **after boot** to trigger autorun (a drive already present at boot is treated as plain storage and does not trigger). On insert → `proc_scriptlauncher` runs copie_scr.sh → run.sh verifies + flashes → writes `pcm_ran.txt = PCM_CLEAN_BTFIX_DONE`.
-
-**Confirmed**: the autorun flashed fully automatically with `flashit_rc=0`, no serial.
-
-> `flashit -a 0x001C0000` erases and rewrites the entire IFS1 region — it is not an additive patch — so flashing this clean version zeroes out ALL prior experiments (auxkick / c1vhook / the various shotguns / the two byte experiments) in one shot; the bench's PCM3Root becomes exactly stock + lock-BT + boot-sound. `/HBpersistence` (audioAmpASK, etc.) is outside the flashed region and must be preserved.
-
----
-
-## 8. Key Addresses (bench MOPF binary, vaddr)
-
-| Item | Address / value |
-|---|---|
-| PCM3Root base | vaddr 0x08040000, fileoff = vaddr − 0x08040000 |
-| Main object CPSoundPresCtrl | heap singleton — ⚠️ **drifts every boot** (observed at 0x086ec01c / 0x086ed694 / 0x086ed01c / 0x086ef01c / 0x0872d694 / 0x0872f01c). **Never hardcode it**: derive it with `main = *(*(*(child+0x38)+0x08)+0x70)` (§10). Identity check: `*(main) == 0x085c4c5c` |
-| child (SourceSinkSupervisor) | *(main+0x1f0), **varies per boot** (seen 0x086dc19c / 0x086e2cfc) |
-| child vtable | **0x085700e0** (5 real methods: 0x08110a84 / 081109c8 / 08111068 / 080930a4 / 0811096c) |
-| entertSourceChanged (source-change) | **0x082a717c** (args: this, &src, &flag) |
-| source-change real entry | 0x082a4854 (= main vtable +0x34; the decompiler name 0x082a4838 is data — wrong) |
-| getter | 0x082a46b0 (returns the AUDIBLE source or -2) |
-| establishment | around 0x082a4e8c (GATE 1: getter() != -2) |
-| gate field child+0x68 | -2 = bug (connected but not activated) / 40 = activated |
-| gate field main+0x94c | 1 = bug (not activated; also one-shot/recursion gate) / 0 = activated |
-| source ids | AUX=24, BT=40 (eSRC_BT_A2DP) |
-| fmguard lock-BT | pool slot 0x082ac898 + cave 0x083f2908~2918 |
-| shotgun cave dead zone | 0x0856484c (869 free bytes in the RX segment) |
-
----
-
-## 9. Lessons Learned
-
-1. **Runtime code injection is infeasible on real HW** — read-only code pages are unwritable (CoW/RO), and without gdb the only path is a flash.
-2. **Static field writes cannot reproduce function side effects** — the sound is a runtime action of the establishment commanding the DSP, not something a few state fields can fake.
-3. **Ghidra's decompilation is unreliable for this binary** — misaligned entries / pool labels; objdump must be the ground truth.
-4. **The shotgun approach is powerful**: when locating the exact handler is too hard, instrument an entire class's vtable and gate each — whichever fires in the target state triggers the fix. It bypasses localization, and a single flash is both the probe and the potential fix.
-5. **Verify every assumption on live hardware**: the hunt for a dead buffer eventually revealed .data is fully used at runtime; the buffer, whether fields are live, the CoW wall — all were discovered only by measuring, never by static assumption.
-6. **A recursion gate is mandatory**: the trigger function (entertSourceChanged) re-enters the instrumented vtable methods; without a one-shot gate it recurses infinitely and overflows the stack.
-7. **Always pass preflight before flashing** (both segments sum-to-zero) — this is the root cause of bricking; FAT USB writes occasionally corrupt, so always cksum-verify after `cp`.
-8. **Never hardcode a heap address.** `main` drifted across six boots. If a pointer must be found at runtime, *walk to it* from something the ABI hands you (the dispatch `this`), bounds-checking every hop before the dereference and validating the result. Scanning is not the alternative — on a hot path it is its own crash.
-9. **Hook upstream of the decision, not downstream of it.** The main-vtable retry handler looked ideal (`this == main` for free) and never fired, because on a reconnect the app never starts the attempt whose retries it handles. Ask *"is this called in the failing case?"* before *"is this convenient?"*.
-10. **Build on what is already proven; change one thing.** The final fix is the 2026-07-08 shotgun with exactly one line replaced. Every attempt to redesign around it (a `.bss` latch, a `+0x944` write, a different vtable) was slower and wrong — and the `+0x944` write actively broke it.
-11. **Keep an invariant that must hold, and check it.** "The lock lever must read `0x07`" is what exposed a bogus binary extraction that otherwise looked like a real variant difference.
-12. **The cheapest verification is the one the target performs itself.** Preflight-with-no-ARM let the *car* compute the payload checksum and confirm the image, before a single byte of flash was written.
-
----
-
-## 10. The Last Mile: the shotgun's one flaw
-
-The child-vtable shotgun made sound on the bench — but it was not yet a *fix*, because of one line:
-
-```python
-prog += [('pc','Lmain',14)]      # r14 = main  (a HARDCODED address)
-```
-
-`main` is the `CPSoundPresCtrl` **heap singleton**, and it **drifts every boot**. Across the snapshots collected over this work it landed at six different addresses: `0x086ec01c`, `0x086ed694`, `0x086ed01c`, `0x086ef01c`, `0x0872d694`, `0x0872f01c`. The cave did have a `g_self` guard (`*(main) == 0x085c4c5c` → else no-op), which makes a *mapped but wrong* address harmless. The killer is the **unmapped** case: the guard itself has to read `*(main)` first, and that read faults → watchdog → the brick you cannot recover.
-
-The obvious alternative — scan the heap for the vtable fingerprint — was tried and was **worse**: the child-vtable methods are hot, and scanning 1.5 MB on every call overloaded the process and crashed it.
-
-### The wrong turn: hooking the main vtable
-
-If a hook on the *main* vtable is used, `this == r4 == main` arrives for free — no scan, no hardcode. That looked like the answer, and slot 2 (`0x082a7350`) was hooked and flashed. **It never fired on a reconnect.**
-
-The reason is structural: slot 2 is the async **retry handler**. It only runs when the app is *already attempting* BT audio. On a cold-boot reconnect the app decides FM/Default and never starts a BT attempt — so the hook sits **downstream of the very decision it is trying to change** and is never called. A hook that can only see the outcome cannot alter the outcome.
-
-### The `+0x944` fork (a trap worth documenting)
-
-While chasing this, a second discovery: `entertSourceChanged` (`0x082a717c`) **forks at `0x082a725c` on `main+0x944`**.
-
-- `+0x944 == 0` → the **durable** child-dispatch leg (`0x082a7290` → `FUN_08110298`). This is what a manual source tap takes. No retry machine, no teardown.
-- `+0x944 != 0` → a **fragile** TLAM connect+retry leg. Its async handler (main vtable slot 2) exhausts ~10 retries and, about 5 seconds later, calls `switchAudio(Default)` — which **tears the sound back down** (`t864` 40→3, `+0x86c` 7→10).
-
-An earlier attempt had *added* `main+0x944 = 1` to the cave on a wrong hypothesis — which forced the fragile leg and made the cave dismantle its own sound five seconds after producing it. Live snapshots settle it: `+0x944 == 0` in **both** the stuck and the playing state. The durable path needs nothing written to it. **The cave must not touch `+0x944`.**
+*The hardcoded `main` in the block above is the flaw that this shotgun shipped with; the narrative of finding it is in [Part III → The Last Mile: the shotgun's one flaw](#the-last-mile-the-shotguns-one-flaw).*
 
 ### The fix: derive `main` from `this`
 
@@ -342,9 +134,64 @@ Everything else in the cave is byte-for-byte the proven 2026-07-08 shotgun: the 
 - **T2** — dispatch with a non-child object: no fire, no fault.
 - **T3** — corrupt `*(child+0x38)` to an out-of-bounds pointer: the hop guard bails. No fault. (Without the guard, this dereference is exactly the brick.)
 
----
+### Tooling Breakthroughs (reusable going forward)
 
-## 11. The Real Car (911/9x1) — done
+#### Reliable SH4 disassembly = Debian binutils-multiarch objdump
+capstone garbles SH4 and Ghidra misaligns functions — only GNU objdump (2.35+, with SH support) is ground truth, and it even resolves pool values and string addresses.
+```bash
+# Build the image (once)
+docker build --platform linux/386 -t sh4gdb:latest - <<'EOF'
+FROM debian:bullseye-slim
+RUN apt-get update -qq && apt-get install -y -qq libncurses5 binutils-multiarch
+EOF
+# Prep: carve PCM3Root's LOAD1 segment (vaddr 0x08040000) to raw text.bin
+# Disassemble (--adjust-vma maps fileoff 0 → 0x08040000)
+objdump -D -b binary -m sh4 -EL --adjust-vma=0x08040000 \
+  --start-address=0x082a4854 --stop-address=0x082a4900 text.bin
+```
+
+#### sh4emu (an SH4 interpreter)
+`code/common/sh4emu.py` + `code/common/sh4_run_switch.py`. Actually **executes arbitrary PCM3Root functions** against a 16 MB memory snapshot of the real car / bench — offline dynamic validation (cures blind static-RE misreads, costs no flash). Every hand-written cave is validated here (transparency, gate logic, recursion safety) before flashing.
+
+#### IFS build pipeline
+PCM3Root is per-file LZO-compressed inside the IFS1. `code/`: inflate → patch-file (exact-size replacement) → deflate (`--ref` preserves block shape + adds the outer sum-to-zero). **Preflight gate** `code/common/verify_ifs_flashable.py`: both the startup segment and the imagefs segment must each sum32le to 0 — **this is the very gate paid for by the two bricked benches in the Prologue**; any non-zero segment is never flashed. Every flash later in this document passes it first.
+
+#### Bench memory read/write
+- Read: over serial, `hd -s <addr> -n <len> /proc/12316/as` (PID is always 12316).
+- Write (RW only): `mp2` = `code/common/sh4tools/mempoke.c`, one byte per call.
+
+### The Clean Final Firmware + USB autorun
+
+#### Composition
+I wanted a clean version that keeps only the effective changes. Diffing the proven fmguard.ifs confirmed that lock-BT needs only 4 patches. So the clean firmware =
+
+```
+stock PCM3Root
+  + fmguard (lock-BT, doesn't drop to FM on disconnect): pool slot 0x082ac898 → cave 0x083f2908~2918
+  + child-shotgun (boot sound): 5 child-vtable slots + cave 0x0856484c
+```
+
+**Failed experiments removed**: `0x082a4147` (skip-a2dp, long proven to be boot dead code) and `0x082b65e0` (the desiredApp lever) — the diff confirmed neither belongs to lock-BT, so they are safe to remove.
+
+> ⚠️ **`0x082b65e0` is not merely unproven — it was measured dead on the real car (2026-06-22).** The running `PCM3Root` already read `0x07` there (signature `02 8D 05 1E 07 E1 15 1E`, persisted from an earlier flash) and the car **still booted to FM**. The same session found `0x821694e` (force-MME) also already applied — same result. Two independent reasons it cannot work:
+>
+> 1. **What gets stored was never 7.** LastMode persists as **10 (Default)**, so remapping `mov #1` → `mov #7` retargets a value the persistence layer doesn't produce in this case.
+> 2. **The boot path never executes that function.** `0x82b65e0` sits in the LastMode *persistence handler* (`FUN_0x82b6538`). The boot decision is `CPOnOffPresCtrl @0x8216940` — `mov #9,r1 / cmp/hi r1,r6` with source 10, so `bt.s` takes the `>9` shortcut and `bra`s straight to the non-MME path. `0x82b65e0` is never reached.
+>
+> The deeper point, which is why this whole family of patches fails: **the boot decision is correct given what exists at the time** — A2DP isn't up yet, so it falls to the always-available FM — and nothing re-evaluates when the phone connects seconds later. A working fix has to ride the **connect** event, which is exactly what the child-vtable shotgun does.
+
+Clean IFS: `PCM3_IFS1_MOPF.CHN.clean.ifs`, cksum **4237630296**, size 10230208.
+
+#### USB autorun (zero-serial deployment)
+Bundle = `copie_scr.sh` (the trigger, XOR-encoded, seed 0x001BE3AC) + `run.sh` (cksum gate + ARM gate + `flashit -v` + one-shot ARM deletion on success + logging) + `ARM_FLASH_CLEAN_BT_FIX.txt` (armed) + `payload/clean.ifs`.
+
+**Timing is critical**: the USB must be inserted **after boot** to trigger autorun (a drive already present at boot is treated as plain storage and does not trigger). On insert → `proc_scriptlauncher` runs copie_scr.sh → run.sh verifies + flashes → writes `pcm_ran.txt = PCM_CLEAN_BTFIX_DONE`.
+
+**Confirmed**: the autorun flashed fully automatically with `flashit_rc=0`, no serial.
+
+> `flashit -a 0x001C0000` erases and rewrites the entire IFS1 region — it is not an additive patch — so flashing this clean version zeroes out ALL prior experiments (auxkick / c1vhook / the various shotguns / the two byte experiments) in one shot; the bench's PCM3Root becomes exactly stock + lock-BT + boot-sound. `/HBpersistence` (audioAmpASK, etc.) is outside the flashed region and must be preserved.
+
+### The Real Car (911/9x1) — done
 
 The old plan in this document read: *"the real car = 911 9x1, with different binary offsets; use objdump to re-locate everything."* **That assumption was wrong, and checking it was free:**
 
@@ -352,7 +199,7 @@ The old plan in this document read: *"the real car = 911 9x1, with different bin
 
 The two IFS images differ in size (10,230,040 vs 10,450,488) only because of *other* variant files in the imagefs. `PCM3Root` itself is the same file. Dead zone, child vtable (all 5 slots + RTTI tags), main vtable, `entertSourceChanged`, the lock levers — all identical, each verified individually. So the car did not get a "port"; it got **the exact binary already proven on the bench**.
 
-### The trap that nearly hid this
+#### The trap that nearly hid this
 
 The first extraction attempt searched the car image for the bench `PCM3Root`'s first 16 bytes (the ELF header) and "found" it at `0x11000`. The result: 97% of bytes differed, vtable slots were garbage, `main` vtable slot 0 was zero. That looked like "a genuinely different variant" — a completely wrong conclusion.
 
@@ -360,20 +207,188 @@ It was caught by a sanity check: the car baseline is the **proven lock-BT build*
 
 **Every SH4 executable in the image starts with the same ELF header.** Locate `PCM3Root` through the **imagefs directory** (`mnt/ifs1/HBproject/PCM3Root`, at decomp `0x800000` in both images) — never by header search. *Have a fact that must be true, and check it: it is what tells you your tool lied to you.*
 
-### The flash (the car is unrecoverable — two steps)
+#### The flash (the car is unrecoverable — two steps)
 
 1. **Preflight, no ARM file on the USB** → `RESULT=PREFLIGHT_ONLY_NO_FLASH`. The car verifies version, variant and payload checksum **without writing flash**. The device's own QNX `cksum` returned `1098328085` — matching the value computed on the host, i.e. the car itself confirmed the image on the stick was intact.
 2. **Only then**, arm and flash: `IFSTYPE_OK=IFS_9X1` → `ARM_OK=1` → erase / program / **verify** `0x001C0000..0x00BB7717` → `flashit_rc=0`.
 
 The variant guard is inverted relative to the bench bundle: it **requires `IFS_9X1` and rejects `IFS_G1_E2`**, so a car USB can never brick the bench (and vice versa). Note the car's `run.sh` does **not** auto-remove the ARM file after flashing — disarm the stick manually, or the next insert re-flashes.
 
-### Result
+#### Result
 
 Park. Take the phone. Come back. Cold start. The phone reconnects — **the music returns on its own, on Bluetooth, with nothing to press.** Confirmed on the bench and on the real car.
 
 ---
 
-## Appendix: Key Files
+## Part III — Problems and dead ends
+
+This part is the journey, kept in the order it happened: the tuition paid up front, the two symptoms, and every attempt that failed with the exact reason it failed. It closes with the lessons learned.
+
+### Prologue: Two Bricked Benches (why I am so careful about flashing)
+
+Before any of this, I had already **bricked two bench units in early flashing experiments — and could not recover them.**
+
+They were not ordinary bricks — they **hit the watchdog**: after a bad image, the firmware fails to start, the watchdog times out and resets, and the unit **reboots endlessly**, resetting too fast to ever hold the IPL's emergency shell — no chance to reflash. Both units were dead for good, disassembled and scrapped.
+
+![The bricked-bench graveyard: several disassembled PCM3.1 units](images/05-bench-graveyard.jpg)
+*The cost: disassembled, scrapped bench units — metal chassis, the CD/DVD mechanism, main boards, and cooling fans scattered on the floor. A watchdog-driven endless-reboot brick cannot be recovered.*
+
+That blood bought the methodology under which **nothing has bricked since** — the reason every "flash succeeded, no brick" in this document holds:
+
+1. **Mandatory pre-flash preflight** (`code/common/verify_ifs_flashable.py`): the PCM3.1 IPL requires the **startup segment and the imagefs segment to each independently sum-to-zero** (early on I only zeroed the whole file → that broke the startup segment → the IPL rejects it → a major source of bricking). Any non-zero segment = never flash.
+2. **Knowing which bricks are recoverable and which are not**: it was later proven that a brick that **stays stable and does not hit the watchdog** (stuck on the logo / dead USB port but a stable IPL) can be revived over a 57600 serial line — reach the emergency shell, start io-usb + devb-umass, mount the USB, `flashit` the stock image back; but a **watchdog endless-reboot brick cannot be saved** — so I would rather have the preflight block it than gamble.
+3. **FAT USB writes occasionally corrupt**: always cksum-verify after `cp` to the USB (during this very wrap-up a write did corrupt, cksum 3367337659 ≠ 4237630296, and was caught on the spot by run.sh's cksum gate).
+
+![Debug / recovery setup: K-CUT serial + USB hub + the MacBook](images/02-bench-serial-debug.jpg)
+*My debug/recovery setup today: the K-CUT USB-to-serial (green LED) goes through a USB hub to the MacBook; the red/black/green jumpers are the 57600 serial TX/RX/GND — this serial line is the lifeline that can recover a "stable" brick.*
+
+![A replacement bench unit boxed, a](images/03-bench-boxed-a.jpg)
+![A replacement bench unit boxed, b](images/04-bench-boxed-b.jpg)
+*Replacement units procured after the two were bricked — only then could the project continue.*
+
+> Keep this in mind — **watchdog endless-reboot = unrecoverable**. Throughout both chapters below, every flash was pressed only after passing the preflight and leaving the serial-recovery option open.
+
+### Chapter 1 — The Original Pain: Reverts to FM Every Time (lock-BT)
+
+#### My original problem
+
+Playing Bluetooth, turn the car off; next time I get in, the head unit **automatically reverts to the FM radio** every single time, and I have to dig into the menu to switch back to Bluetooth audio — **every single trip**. This was the starting point of the entire project.
+
+#### The investigation (this chapter had its own dead ends)
+
+- **First theory: an "A2DP→FM fallback master gate"** (0x082a4156): the belief that boot ran this code and forced the source back to FM. **Disproven**: that code is **dead** for boot — CPOnOffPresCtrl decides "not MME" and bypasses it entirely, so it never runs.
+- **The LastMode theory**: on power-off, the head unit saves LastMode = 10 (Default) rather than 7 (BT); at boot, CPOnOffPresCtrl reads 10 → "not MME" → falls to FM. A "Solution D = read-side remap 10 → 7" was drafted.
+- **Flashing A+B on the bench → still reverts to FM**: this flash was the turning point — it **proved that the Publishing/fallback layer is dead code for boot**, and that the real decision happens in the runtime **source-arbitration funnel** (inside CPSoundPresCtrl), not in the OnOff/fallback layer. It corrected a long-standing "patching the wrong layer" mistake (the same lesson Issue-1 would later lean on: **reproduce on live hardware, don't reason statically**).
+
+*The guard that came out of this is in [Part II → fmguard (a source-arbitration guard)](#fmguard-a-source-arbitration-guard).*
+
+> But once Bluetooth was locked, a subtler problem surfaced — **with Bluetooth held connected at boot, there is no sound**. That is Chapter 2.
+
+### Chapter 2 — BT Held, But Silent (Issue-1)
+
+#### The Problem (Issue-1)
+
+**Symptom**: When Bluetooth is held connected across a boot, the phone connects — the screen shows the "Bluetooth connected" popup and the phone name — **but there is no sound and no track name**.
+
+**Two key clues I noticed** (which turned out to be the keys to the whole case):
+
+1. **Only a genuine source-CHANGE restores sound**: In the bug state (silent), manually switching to **AUX and then back to Bluetooth (AUX→BT)** restores sound; but **re-selecting Bluetooth (BT→BT) does not**. So audio activation only fires on a real "source change."
+
+2. **A precondition that exists only after being used once**: In the normal (sound-on) state, disconnecting the phone (the page holds, doesn't drop to FM) and reconnecting **recovers playback**; but in the bug state, reconnecting does **not** recover. So there is some state that is not established at boot but is present once the source has been used once.
+
+**Goal**: Make Bluetooth auto-play with sound at boot (equivalent to automatically doing one AUX→BT).
+
+#### The Investigation (every dead end, with the exact reason it failed)
+
+> This section is the core value of the document — every dead end was tested on real hardware, each with its exact cause. **Do not walk these again.**
+
+##### Dead end ① Static field writes (mp2 writing heap directly)
+Using mp2, I wrote all 6 fields that AUX→BT changes (`CHILD+0x68 -2→40` connected source, `CHILD+0x6c`, `MAIN+0x864`, `MAIN+0x86c`, `MAIN+0x94c`, `CHILD+0xc4` media cursor) to their normal-state values.
+**Result: no sound.** And across disconnect + reconnect the fields **held** and it was still silent — hard proof.
+**Reason**: those 6 fields are **results, not causes** of AUX→BT. The actual sound is a **side effect of the establishment commanding the DSP**; static field writes cannot reproduce it.
+
+##### Dead end ② Hooking vtable +0x44
+I assumed the source-change was at main-object vtable +0x44 (0x082a7b40 = processCurrentEntertainmentSource). I built a cave replicating AUX→BT and flashed it.
+**Result: never fired.** After BT connects at boot, +0x44 is simply not called.
+**Reason**: wrong slot — the source-change is actually at **+0x34** (0x082a4854), and the connect event does not go through the main vtable at all (see dead end ⑥).
+
+##### Dead end ③ Runtime code injection (no flash)
+I tried injecting the cave directly into the running process memory to avoid a flash.
+**Result: `ERR write failed`.**
+**Reason: the CoW wall (proven on real HW)**. mp2 (via /proc lseek+write) can write RW pages (.data/heap) but **fails on read-only code/rodata pages**. The bench also has no gdb/pdebug. So the cave can only go into flash, never a runtime injection.
+
+##### Dead end ④ Precise patch via Ghidra decompilation
+I tried to patch the getter/establishment surgically.
+**Result: couldn't proceed safely.**
+**Reason: Ghidra's decompilation is unreliable** for this binary — function entry addresses are systematically misaligned (the real source-change entry is 0x082a4854, not the decompiler name 0x082a4838 — the first 28 bytes are data/a jump table); pool labels are wrong (a "pointer to the getter" actually pointed to a string). **Had to switch to a reliable tool** (objdump — see "Tooling Breakthroughs" in Part II).
+
+##### Dead end ⑤ vtrace dynamic instrumentation (log which method fires)
+Plan: instrument all 20 main-vtable slots, each logging to a .data ring buffer; after connect, read the buffer to see which method fired.
+**Result: nowhere to put the buffer.**
+**Reason**: the entire .data segment is used at runtime by the program ("all zeros in the IFS" is an illusion — .data is filled at runtime), so there is no dead buffer region; and the system logger requires a complex context object that is too heavy to replicate in a cave.
+**Turning point**: switch to the shotgun approach (below), using an existing field `main+0x94c` as the gate — no buffer needed.
+
+##### Dead end ⑥ Main-vtable shotgun (instrument all + gate, fix directly)
+Instead of "locate then fix," instrument all 20 main-vtable methods, each gated (if in the bug state, trigger AUX→BT). Whichever one is called triggers the fix — bypassing the localization problem.
+**Result: after BT connects at boot, main+0x94c stayed 1 = none of them fired.**
+**But this was a valuable diagnostic**: doing a manual AUX→BT flipped main+0x94c to 0 = the main vtable IS exercised by the source-change path = **the shotgun mechanism works**.
+**Conclusion**: **the connect handler is NOT in the main vtable.** The connect path and the source-change path are two independent code paths, and the connect does not trigger the main source-change — which is exactly the bug.
+
+##### ✅ Success ⑦ Child-vtable shotgun
+Since the connect goes through the child (SourceSinkSupervisor) object (it modified `CHILD+0xc4`, the media cursor, on connect), **instrument the child's vtable**.
+**Result: success!** At boot, holding BT → it connects → one of the child's vtable methods is called (in the bug state) → the gate passes → forced AUX→BT → the establishment activates → **sound**.
+
+*Two further levers that were measured dead — `0x082a4147` (skip-a2dp) and `0x082b65e0` (the desiredApp lever, measured dead on the real car) — are documented where they were dropped, in [Part II → The Clean Final Firmware + USB autorun](#the-clean-final-firmware--usb-autorun).*
+
+#### The Last Mile: the shotgun's one flaw
+
+The child-vtable shotgun made sound on the bench — but it was not yet a *fix*, because of one line:
+
+```python
+prog += [('pc','Lmain',14)]      # r14 = main  (a HARDCODED address)
+```
+
+`main` is the `CPSoundPresCtrl` **heap singleton**, and it **drifts every boot**. Across the snapshots collected over this work it landed at six different addresses: `0x086ec01c`, `0x086ed694`, `0x086ed01c`, `0x086ef01c`, `0x0872d694`, `0x0872f01c`. The cave did have a `g_self` guard (`*(main) == 0x085c4c5c` → else no-op), which makes a *mapped but wrong* address harmless. The killer is the **unmapped** case: the guard itself has to read `*(main)` first, and that read faults → watchdog → the brick you cannot recover.
+
+The obvious alternative — scan the heap for the vtable fingerprint — was tried and was **worse**: the child-vtable methods are hot, and scanning 1.5 MB on every call overloaded the process and crashed it.
+
+##### The wrong turn: hooking the main vtable
+
+If a hook on the *main* vtable is used, `this == r4 == main` arrives for free — no scan, no hardcode. That looked like the answer, and slot 2 (`0x082a7350`) was hooked and flashed. **It never fired on a reconnect.**
+
+The reason is structural: slot 2 is the async **retry handler**. It only runs when the app is *already attempting* BT audio. On a cold-boot reconnect the app decides FM/Default and never starts a BT attempt — so the hook sits **downstream of the very decision it is trying to change** and is never called. A hook that can only see the outcome cannot alter the outcome.
+
+##### The `+0x944` fork (a trap worth documenting)
+
+While chasing this, a second discovery: `entertSourceChanged` (`0x082a717c`) **forks at `0x082a725c` on `main+0x944`**.
+
+- `+0x944 == 0` → the **durable** child-dispatch leg (`0x082a7290` → `FUN_08110298`). This is what a manual source tap takes. No retry machine, no teardown.
+- `+0x944 != 0` → a **fragile** TLAM connect+retry leg. Its async handler (main vtable slot 2) exhausts ~10 retries and, about 5 seconds later, calls `switchAudio(Default)` — which **tears the sound back down** (`t864` 40→3, `+0x86c` 7→10).
+
+An earlier attempt had *added* `main+0x944 = 1` to the cave on a wrong hypothesis — which forced the fragile leg and made the cave dismantle its own sound five seconds after producing it. Live snapshots settle it: `+0x944 == 0` in **both** the stuck and the playing state. The durable path needs nothing written to it. **The cave must not touch `+0x944`.**
+
+*The design that replaced the hardcoded `main` is in [Part II → The fix: derive `main` from `this`](#the-fix-derive-main-from-this), and its offline proof in [Proving it before flashing](#proving-it-before-flashing).*
+
+*One more trap lives with the section it qualifies: the ELF-header search that nearly hid the bench/car binary identity is in [Part II → The trap that nearly hid this](#the-trap-that-nearly-hid-this).*
+
+---
+### Lessons Learned
+
+1. **Runtime code injection is infeasible on real HW** — read-only code pages are unwritable (CoW/RO), and without gdb the only path is a flash.
+2. **Static field writes cannot reproduce function side effects** — the sound is a runtime action of the establishment commanding the DSP, not something a few state fields can fake.
+3. **Ghidra's decompilation is unreliable for this binary** — misaligned entries / pool labels; objdump must be the ground truth.
+4. **The shotgun approach is powerful**: when locating the exact handler is too hard, instrument an entire class's vtable and gate each — whichever fires in the target state triggers the fix. It bypasses localization, and a single flash is both the probe and the potential fix.
+5. **Verify every assumption on live hardware**: the hunt for a dead buffer eventually revealed .data is fully used at runtime; the buffer, whether fields are live, the CoW wall — all were discovered only by measuring, never by static assumption.
+6. **A recursion gate is mandatory**: the trigger function (entertSourceChanged) re-enters the instrumented vtable methods; without a one-shot gate it recurses infinitely and overflows the stack.
+7. **Always pass preflight before flashing** (both segments sum-to-zero) — this is the root cause of bricking; FAT USB writes occasionally corrupt, so always cksum-verify after `cp`.
+8. **Never hardcode a heap address.** `main` drifted across six boots. If a pointer must be found at runtime, *walk to it* from something the ABI hands you (the dispatch `this`), bounds-checking every hop before the dereference and validating the result. Scanning is not the alternative — on a hot path it is its own crash.
+9. **Hook upstream of the decision, not downstream of it.** The main-vtable retry handler looked ideal (`this == main` for free) and never fired, because on a reconnect the app never starts the attempt whose retries it handles. Ask *"is this called in the failing case?"* before *"is this convenient?"*.
+10. **Build on what is already proven; change one thing.** The final fix is the 2026-07-08 shotgun with exactly one line replaced. Every attempt to redesign around it (a `.bss` latch, a `+0x944` write, a different vtable) was slower and wrong — and the `+0x944` write actively broke it.
+11. **Keep an invariant that must hold, and check it.** "The lock lever must read `0x07`" is what exposed a bogus binary extraction that otherwise looked like a real variant difference.
+12. **The cheapest verification is the one the target performs itself.** Preflight-with-no-ARM let the *car* compute the payload checksum and confirm the image, before a single byte of flash was written.
+
+
+## Appendix
+
+### Key Addresses (bench MOPF binary, vaddr)
+
+| Item | Address / value |
+|---|---|
+| PCM3Root base | vaddr 0x08040000, fileoff = vaddr − 0x08040000 |
+| Main object CPSoundPresCtrl | heap singleton — ⚠️ **drifts every boot** (observed at 0x086ec01c / 0x086ed694 / 0x086ed01c / 0x086ef01c / 0x0872d694 / 0x0872f01c). **Never hardcode it**: derive it with `main = *(*(*(child+0x38)+0x08)+0x70)` (see "The fix: derive `main` from `this`" in Part II). Identity check: `*(main) == 0x085c4c5c` |
+| child (SourceSinkSupervisor) | *(main+0x1f0), **varies per boot** (seen 0x086dc19c / 0x086e2cfc) |
+| child vtable | **0x085700e0** (5 real methods: 0x08110a84 / 081109c8 / 08111068 / 080930a4 / 0811096c) |
+| entertSourceChanged (source-change) | **0x082a717c** (args: this, &src, &flag) |
+| source-change real entry | 0x082a4854 (= main vtable +0x34; the decompiler name 0x082a4838 is data — wrong) |
+| getter | 0x082a46b0 (returns the AUDIBLE source or -2) |
+| establishment | around 0x082a4e8c (GATE 1: getter() != -2) |
+| gate field child+0x68 | -2 = bug (connected but not activated) / 40 = activated |
+| gate field main+0x94c | 1 = bug (not activated; also one-shot/recursion gate) / 0 = activated |
+| source ids | AUX=24, BT=40 (eSRC_BT_A2DP) |
+| fmguard lock-BT | pool slot 0x082ac898 + cave 0x083f2908~2918 |
+| shotgun cave dead zone | 0x0856484c (869 free bytes in the RX segment) |
+
+### Key Files
 
 - `code/bluetooth-fix/build_shotgun_child_chain.py` — **the solution**: child-vtable cave with the self-derived `main`
 - `code/bluetooth-fix/validate_shotgun_child_chain.py` — sh4emu proof against the real `-2` snapshot (T1 fires / T2 safe / T3 no fault)
@@ -386,9 +401,7 @@ Park. Take the phone. Come back. Cold start. The phone reconnects — **the musi
 - Clean final firmware (cksum **4237630296**) — **not in this repo** (modified proprietary firmware); build your own with the tools above
 - USB autorun bundle — scripts in `code/bluetooth-fix/autorun/`; the `.ifs` payload is **not included**
 
----
-
-## Acknowledgments
+### Acknowledgments
 
 Huge thanks to the following references — they gave this whole effort a solid foundation and direction:
 

@@ -1,4 +1,4 @@
-# PCM 3.1 · independent hardware-layer overlay framework
+# PCM 3.1 · Volume OSD — built on an independent hardware-layer overlay framework
 
 Draw your own popups — a volume OSD, toasts, dialogs — **on top of the stock PCM 3.1 UI**,
 with **no flash write at all**, no ghosting, and physical isolation from the stock UI.
@@ -13,9 +13,22 @@ transparency, the bar tracking the volume knob live, auto-dismiss.
 *The stock page underneath keeps working normally — the progress bar advances, the clock
 ticks, the highlighted button stays highlighted. That coexistence is the entire point.*
 
+| Part | What is in it |
+|---|---|
+| [Part I — How it works](#part-i--how-it-works) | §1 the idea · §2 the hardware facts · §3 the live volume chain |
+| [Part II — The solution](#part-ii--the-solution) | §4 layer arbitration · §5 code layout · §6 the bench loop · §7 screenshot verification |
+| [Part III — Problems and dead ends](#part-iii--problems-and-dead-ends) | §8 index of the inline traps · §9 dead ends |
+| [Appendix](#appendix) | References |
+
 ---
 
-## 1. The idea
+## Part I — How it works
+
+The background the rest of this document assumes: the approach, the hardware facts it rests
+on, and where the displayed volume value comes from. Traps are kept beside the recipe they
+qualify rather than moved out of it; §8 indexes them.
+
+### 1. The idea
 
 Become a **second QNX Graphics Framework (gf) client** and take an idle Carmine hardware
 layer that `layermanager` never allocates, then draw on it independently.
@@ -33,11 +46,11 @@ isolation guarantee.
 
 ---
 
-## 2. Hardware facts you must know
+### 2. Hardware facts you must know
 
 Every one of these was paid for in debugging time. **Skipping this section costs you a day.**
 
-### 2.1 ★★★ The driver inverts layer numbers: `hw_layer = 7 − gf_layer`
+#### 2.1 ★★★ The driver inverts layer numbers: `hw_layer = 7 − gf_layer`
 
 `devg-carmine.so` does `neg rN,r1 / add #7,r1` in three independent places
 (`carmine_layer_query@0x12cec`, `set_surface@0x12f86`, `set_dest_viewport@0x13124`).
@@ -51,7 +64,7 @@ Every one of these was paid for in debugging time. **Skipping this section costs
 > We burned an entire night on "layer 6" asking why only blue, green and black rendered.
 > This inversion was the answer — we thought we were on L6; we were on L1.
 
-### 2.2 The pixel format is RGBA5551, **not** ARGB1555
+#### 2.2 The pixel format is RGBA5551, **not** ARGB1555
 
 `gf_layer_query` reporting `0x1710` (ARGB1555) is **a lie**. The driver hardwires
 `LnEC=0b10` for all 16bpp, which the manual defines (p.430) as
@@ -72,7 +85,7 @@ with output "shifted 3 bits toward the MSB side" — matching our measurements e
 `ui_core.c`'s `ui_rgb()` already emits exactly this layout, so the renderer needed no
 changes at all.
 
-### 2.3 What transparency you actually get
+#### 2.3 What transparency you actually get
 
 | capability | available? | notes |
 |---|---|---|
@@ -86,7 +99,7 @@ Passing `SRC_PIXEL_ALPHA` (`0x00010102`) falls through to an error path that ret
 **never sends the message** — a silent no-op. Note that `0x00080102` (M1_MAP) **is** on the
 whitelist, which is why the alpha-plane route below works.
 
-### 2.3.1 ★★★ The alpha plane: recipe, and the trap that costs you a day
+#### 2.3.1 ★★★ The alpha plane: recipe, and the trap that costs you a day
 
 > ⛔ **Read Trap 3 before you use any of this in a car.** Allocating an alpha plane is
 > permanent and there are only four of them; on a stock 911 taking one disables the OEM
@@ -186,7 +199,7 @@ deliberately feeding it a bad value.
 The probe is `code/common/sh4tools/alphatab.c` — read-only, ~4.8 KB, prints the whole table plus a
 `SANITY=OK/BAD` line that catches a wrong base address instead of quietly returning noise.
 
-### 2.4 ★★★ Deadlock rule: every `gf_layer_update` needs a full re-assert first
+#### 2.4 ★★★ Deadlock rule: every `gf_layer_update` needs a full re-assert first
 
 ```
 gf_layer_set_surfaces → set_src_viewport → set_dst_viewport
@@ -199,7 +212,7 @@ gf_layer_set_surfaces → set_src_viewport → set_dst_viewport
 - In practice, funnel every screen update through a **single exit point `push_layer()`**
   and never bypass it.
 
-> ### ⚠️ Correction (2026-08-02/04) — earlier revisions of this document were wrong here
+> #### ⚠️ Correction (2026-08-02/04) — earlier revisions of this document were wrong here
 >
 > This section used to say *"`gf_layer_disable` + `update` deadlocks the same way, so an
 > OSD must not hide itself with `disable`; fill the area with `0x0000` instead"*. Both
@@ -220,13 +233,13 @@ gf_layer_set_surfaces → set_src_viewport → set_dst_viewport
 > - **Process death does not release the layer either.** After `kill -9` the enable bit
 >   stays 1 forever; the popup freezes on screen until something explicitly clears it.
 >   Install/update tooling must therefore assume a predecessor left a layer enabled and
->   purge it (see §4.3).
+>   purge it (see §4.5).
 
 Diagnosing: `pidin | grep <name>` and read the **Blocked column** — `REPLY 4104` means
 stuck in gdc; `REPLY 3` means stuck on the serial driver `devc-sersci` (a different trap,
-see §5).
+see §6).
 
-### 2.5 Everything else
+#### 2.5 Everything else
 
 - **The dst viewport is symmetric after all: width *and* height are `x2-x1+1`.**
   ⚠️ Earlier revisions claimed height was `y2-y1` with no `+1`. Measured 2026-08-04 by
@@ -254,12 +267,59 @@ see §5).
 
 ---
 
-## 2.6 ★★★★★ Layer arbitration — the part that actually decides whether this ships
+### 3. The live volume chain (V4)
+
+The data source that makes the bar track the knob. **Taken verbatim from `coexist_vol.c`
+v37, which was already proven on the bench — not one constant was changed.**
+
+> `coexist_vol.c` was the standalone volume-OSD predecessor; it is **not shipped in this
+> repo** — `code/volume-osd/coexist_pop.c` supersedes it. It is named here only to record
+> where these constants came from and that they were not re-derived.
+
+```
+scan the heap for  u32 == 0x085c76fc
+  and  u32@(X+0x160) == X-0x218
+  and  u32@(X-0x218) == 0x085c4c5c        → this is V
+P      = u32@(V+0x168)
+ok     = u32@(P+0xc8) == 2                 (DATA_OK)
+volume = u8@(P+0x7c)                       (0..40)   ★
+src    = u32@(P+0x74) ∈ {34,35}            → ringtone, discard
+```
+
+Access is `open /proc/<PCM3Root pid>/as` + `lseek` + `read` — **read-only, and it never
+touches an IPC/IOC channel** (that path once hung both the bench and the real car). Heap
+scan range `0x0866e200 – 0x08a00000`, 64 KB at a time.
+
+> ⚠️ **The `0x218` here is a structural validation offset, not the volume.**
+> The discredited "0x218 = main volume" was an offset in a *persistence file* (it actually
+> turned out to be the SMS notification tone, slot 9). Two namespaces, same number —
+> **do not "helpfully correct" it.**
+
+#### Four guards in the value layer
+
+| guard | why |
+|---|---|
+| **Debounce** (accept only after 2 identical reads) | when idle, the cache oscillates between 19 and 20 → without this the popup pops up on its own with nobody touching the knob |
+| **Seed on boot** (record the first valid value without drawing) | otherwise boot, and every `ui.def` edit, triggers a popup |
+| **Override-state logging** | a leftover `/tmp/uival` from testing **permanently shadows the live chain** with no indication whatsoever |
+| **Re-locate on loss** (rescan only after 10 s of failed reads) | the threshold must exceed one incoming call, or a call wastes a full 3.57 MB heap scan |
+
+> ⚠️ Do not copy `coexist_vol.c`'s rescan guard — **that code is dead**: `int vol=-1;` is
+> never assigned, so `vol<0` is always true and it rescans the whole heap unconditionally.
+
+---
+
+## Part II — The solution
+
+What was built on those facts: how the layer is *kept* rather than merely acquired, how the
+popup is described and rendered, and how a change reaches the bench and is verified there.
+
+### 4. ★★★★★ Layer arbitration — the part that actually decides whether this ships
 
 Everything above is about *drawing*. This section is about *keeping the layer*, and it is
 where every real-car failure of this framework has come from.
 
-### 2.6.1 There is no ownership. The layer state is last-writer-wins.
+#### 4.1 There is no ownership. The layer state is last-writer-wins.
 
 `gf_layer_attach(..., GF_LAYER_ATTACH_PASSIVE)` **succeeds for two clients at once**. The
 per-layer state the hardware scans out — pixel format, pitch, height, base address,
@@ -273,7 +333,7 @@ Record address: `base + 0xe28 + display*0x5a0 + hw_layer*120`, fields at
 `0777` — so **you can watch your own layer's record and tell, per frame, whether you still
 own it.** That read-only check is the foundation of everything below.
 
-### 2.6.2 The failure mode this produces
+#### 4.2 The failure mode this produces
 
 When another client reprograms the record while your layer is enabled, the hardware keeps
 scanning **your** memory with **their** pitch/format. A 544-pixel-wide buffer read as
@@ -290,7 +350,7 @@ second gf client that attaches any layer. Log:
                                                           the car showed
 ```
 
-### 2.6.3 ❌ Dead end: "pick a layer nobody uses"
+#### 4.3 ❌ Dead end: "pick a layer nobody uses"
 
 The obvious fix is to find an idle layer. **It does not generalise, because the layer map
 differs per vehicle model.**
@@ -310,7 +370,7 @@ no popup was showing*.
 > **Rule: never disable a hardware layer you do not exclusively own — and you never
 > exclusively own one.**
 
-### 2.6.4 ✅ The answer: a yield protocol (borrow the OEM's own priority model)
+#### 4.4 ✅ The answer: a yield protocol (borrow the OEM's own priority model)
 
 Instead of asking "which layer is free", mirror what the stock stack already does: **when
 a higher-priority feature activates, lower-priority ones suspend.**
@@ -337,7 +397,7 @@ Result on the car: PDC zones and the reversing camera behave exactly like stock;
 disappears while the radar owns the layer and comes back on its own afterwards. **This
 also removes the need to know any vehicle's layer map.**
 
-### 2.6.5 Startup must assume a predecessor left a mess
+#### 4.5 Startup must assume a predecessor left a mess
 
 Because a killed process does not release its layer (§2.4), every start purges first:
 walk the candidate layers, and for any whose record still carries *our* signature
@@ -353,7 +413,7 @@ cannot collide), attach it and do one `disable` + `update`.
 Also trap `SIGTERM`/`SIGINT`/`SIGHUP`/`SIGQUIT`/`SIGSEGV`/`SIGBUS` and turn the layer off
 before exiting. `kill -9` cannot be caught — that case is what the purge exists for.
 
-### 2.6.6 Hiding: order matters
+#### 4.6 Hiding: order matters
 
 Turn the layer **off first**, *then* clear the buffers:
 
@@ -371,7 +431,7 @@ after the layer is off. Clear the alpha plane too.
 
 ---
 
-## 3. Code layout
+### 5. Code layout
 
 ```
 code/volume-osd/
@@ -388,7 +448,7 @@ code/volume-osd/
 The engine hashes it once a second and re-parses on change — **no recompile, no 66 KB
 binary transfer**. That is an order-of-magnitude difference in iteration speed.
 
-### Writing a `ui.def`
+#### Writing a `ui.def`
 
 `w`/`h` describe the **widget box**; the shadow margin is carved out of it, so the visible
 panel is `w - 2*shadow` × `h - 2*shadow`, centred. (Earlier revisions carved the margin off
@@ -422,7 +482,7 @@ found by sampling real screenshots:
   clean background between panel and shadow (measured: panel ended at x=390, x=391-393 were
   pure background, shadow only started at x=394).
 
-### Render pipeline
+#### Render pipeline
 
 ```
 ui_render()  →  ui_popbuf (RGBA5551 colour)
@@ -444,49 +504,7 @@ never requires recreating the surface.
 
 ---
 
-## 4. The live volume chain (V4)
-
-The data source that makes the bar track the knob. **Taken verbatim from `coexist_vol.c`
-v37, which was already proven on the bench — not one constant was changed.**
-
-> `coexist_vol.c` was the standalone volume-OSD predecessor; it is **not shipped in this
-> repo** — `code/volume-osd/coexist_pop.c` supersedes it. It is named here only to record
-> where these constants came from and that they were not re-derived.
-
-```
-scan the heap for  u32 == 0x085c76fc
-  and  u32@(X+0x160) == X-0x218
-  and  u32@(X-0x218) == 0x085c4c5c        → this is V
-P      = u32@(V+0x168)
-ok     = u32@(P+0xc8) == 2                 (DATA_OK)
-volume = u8@(P+0x7c)                       (0..40)   ★
-src    = u32@(P+0x74) ∈ {34,35}            → ringtone, discard
-```
-
-Access is `open /proc/<PCM3Root pid>/as` + `lseek` + `read` — **read-only, and it never
-touches an IPC/IOC channel** (that path once hung both the bench and the real car). Heap
-scan range `0x0866e200 – 0x08a00000`, 64 KB at a time.
-
-> ⚠️ **The `0x218` here is a structural validation offset, not the volume.**
-> The discredited "0x218 = main volume" was an offset in a *persistence file* (it actually
-> turned out to be the SMS notification tone, slot 9). Two namespaces, same number —
-> **do not "helpfully correct" it.**
-
-### Four guards in the value layer
-
-| guard | why |
-|---|---|
-| **Debounce** (accept only after 2 identical reads) | when idle, the cache oscillates between 19 and 20 → without this the popup pops up on its own with nobody touching the knob |
-| **Seed on boot** (record the first valid value without drawing) | otherwise boot, and every `ui.def` edit, triggers a popup |
-| **Override-state logging** | a leftover `/tmp/uival` from testing **permanently shadows the live chain** with no indication whatsoever |
-| **Re-locate on loss** (rescan only after 10 s of failed reads) | the threshold must exceed one incoming call, or a call wastes a full 3.57 MB heap scan |
-
-> ⚠️ Do not copy `coexist_vol.c`'s rescan guard — **that code is dead**: `int vol=-1;` is
-> never assigned, so `vol<0` is always true and it rescans the whole heap unconditionally.
-
----
-
-## 5. Bench development loop (no USB stick)
+### 6. Bench development loop (no USB stick)
 
 ```bash
 # Build (the script aborts on `error:` instead of leaving a stale binary to fool you)
@@ -509,7 +527,7 @@ python3 code/common/serial/ser2.py 'echo 30 > /tmp/uival'
 python3 code/common/serial/ser2.py 'rm -f /tmp/uival'
 ```
 
-### Serial-specific traps
+#### Serial-specific traps
 
 1. **Always launch with `</dev/null >/dev/null 2>/dev/null`.**
    If the serial cable is attached and nobody drains it, `devc-sersci` (pid 3) fills its
@@ -535,7 +553,7 @@ python3 code/common/serial/ser2.py 'rm -f /tmp/uival'
 
 ---
 
-## 5.1 Verify with real screenshots, not by staring at the screen
+### 7. Verify with real screenshots, not by staring at the screen
 
 The unit can hand you the **composited** frame — stock UI *and* your overlay — so almost
 every UI question is answerable offline instead of by asking someone to photograph a
@@ -572,7 +590,33 @@ so that one class of bug still needs a photograph. Say so explicitly when you as
 
 ---
 
-## 6. Dead ends — do not retry
+## Part III — Problems and dead ends
+
+The traps and the approaches that were tried and abandoned. Traps that cannot be separated
+from the recipe they qualify stay with it and are only indexed here; the dead ends are
+stated in full.
+
+### 8. Index of the traps documented inline
+
+Each of these is written where it applies, not here. This table is navigation only.
+
+| trap | documented in |
+|---|---|
+| 2.1 ★★★ The driver inverts layer numbers: `hw_layer = 7 − gf_layer` | Part I §2.1 |
+| 2.2 The pixel format is RGBA5551, **not** ARGB1555 | Part I §2.2 |
+| 🚨 Trap 1 — the alpha plane's byte stride must be 64-byte aligned | Part I §2.3.1 |
+| 🚨 Trap 2 — re-assert the blending on every push | Part I §2.3.1 |
+| 🚨🚨🚨 Trap 3 — allocating an alpha plane is permanent, and there are only four | Part I §2.3.1 |
+| 2.4 ★★★ Deadlock rule: every `gf_layer_update` needs a full re-assert first | Part I §2.4 |
+| ⚠️ Correction (2026-08-02/04) — earlier revisions of this document were wrong here | Part I §2.4 |
+| 2.5 Everything else | Part I §2.5 |
+| 4.3 ❌ Dead end: "pick a layer nobody uses" — kept with the yield protocol it motivates | Part II §4.3 |
+| 🚨 The yield action must be *nothing*. Do not "hide cleanly" first | Part II §4.4 |
+| Serial-specific traps | Part II §6 |
+
+---
+
+### 9. Dead ends — do not retry
 
 | approach | verdict |
 |---|---|
@@ -582,12 +626,14 @@ so that one class of bug still needs a photograph. Say so explicitly when you as
 | Sharing the stock surface 0x1f | Dynamic-page ghosting is structural; superseded by this framework |
 | BGRA8888 / 32bpp | Not supported by the layer. It "succeeds" only because the library never validates |
 | Guessing channel/byte order | One `0xFFFF` measurement settles it: an all-ones pixel must render saturated white under *any* bit arrangement |
-| **Choosing a layer from a bench census** | **Dead end.** The layer map is per vehicle model. Hardware L6 measured completely idle across 221 s of heavy operation on a Panamera bench, and is the PDC radar/car-model layer on a 911. Use the yield protocol (§2.6.4) instead of trying to find a free layer |
+| **Choosing a layer from a bench census** | **Dead end.** The layer map is per vehicle model. Hardware L6 measured completely idle across 221 s of heavy operation on a Panamera bench, and is the PDC radar/car-model layer on a 911. Use the yield protocol (§4.4) instead of trying to find a free layer |
 | Hiding by clearing pixels to `0x0000` | Only works while nothing resets the blending config. Another gf client touching display-wide state turns your "transparent" pixels into an opaque black rectangle. Hide with `disable` + `update` (§2.4) |
 
 ---
 
-## 7. References
+## Appendix
+
+### References
 
 - Chip manual: MB86297A (layer registers around p.430-432).
   ⚠️ **Not** the MB86296S CORAL-PA spec — that is the previous generation with only L0-L5.
