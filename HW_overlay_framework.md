@@ -88,6 +88,10 @@ whitelist, which is why the alpha-plane route below works.
 
 ### 2.3.1 ★★★ The alpha plane: recipe, and the trap that costs you a day
 
+> ⛔ **Read Trap 3 before you use any of this in a car.** Allocating an alpha plane is
+> permanent and there are only four of them; on a stock 911 taking one disables the OEM
+> parking-distance display for the rest of the ignition cycle. Ship `panel_alpha = 255`.
+
 This gets you a translucent panel with **opaque** text on it, anti-aliased rounded corners
 and a real drop shadow — none of which the 1-bit path can express.
 
@@ -141,6 +145,46 @@ set_surfaces → set_blending → set_src_viewport → set_dst_viewport
 (`ui_core.c`'s `ui_al[]`). Do **not** try to infer it from colour (e.g. "this pixel equals
 the panel colour, so it is background") — the moment you add a gradient, most panel pixels
 no longer equal the panel colour and the whole background turns opaque.
+
+**🚨🚨🚨 Trap 3 — allocating an alpha plane is permanent, and there are only four.**
+
+This one does not cost you a day. It costs the driver their parking sensors.
+
+`gdcServerCarmine` hands out alpha blending planes from a pool of four (LA0..LA3). On a
+stock car the OEM already holds **three** of them at boot, so exactly one is free. And the
+release path is **unreachable**: the allocator hands out indices `8..11`, while the guard on
+the release branch is `cmp/hi #3`. The two ranges do not intersect, so a plane that is
+issued is never returned until the unit is powered off.
+
+So the first time your popup draws with `panel_alpha < 255`, it takes the last free plane
+and holds it for the whole ignition cycle. Engage reverse after that and the OEM
+parking-distance display cannot get a plane: it draws its proximity zones with the correct
+kidney geometry and soft edges, filled **solid black**. Do it in the other order — radar
+first, popup second — and everything is fine all cycle, because the OEM got there first.
+That order-dependence is the signature; if you ever see it, suspect a one-shot resource.
+
+Measured on the bench by reading the server's own allocation table out of `/proc/<pid>/as`
+(`ledger[k] = *(u32*)(0x080dbd04 + disp*0x0e24 + 56*k + 88)`; `k = 0..7` are the hardware
+layers, `k = 8..11` are LA0..LA3, and a value `> 11` means free):
+
+| | LA0 | LA1 | LA2 | LA3 |
+|---|---|---|---|---|
+| at boot | layer 0 | layer 4 | layer 5 | **free** |
+| after two draws at `panel_alpha = 255` | layer 0 | layer 4 | layer 5 | **free** |
+| after one draw at `panel_alpha = 240` | layer 0 | layer 4 | layer 5 | **layer 6 — ours** |
+
+The third row was read *after* the popup had already hidden, and after the code had issued
+an all-zero `gf_layer_set_blending` to unbind. The plane does not come back. (That all-zero
+call is harmless in the other direction: `mode = 0` makes the client clear the byte the
+server's first gate tests, so an unbind never allocates. Only the `M1_MAP` modes do.)
+
+⇒ **Ship `panel_alpha = 255` in any unit fitted to a car.** You lose the translucent panel
+and the anti-aliased corners; you keep the parking sensors. Our USB bundle builder refuses
+to package a `ui.def` that says anything else, and that guard has been tested by
+deliberately feeding it a bad value.
+
+The probe is `code/sh4tools/alphatab.c` — read-only, ~4.8 KB, prints the whole table plus a
+`SANITY=OK/BAD` line that catches a wrong base address instead of quietly returning noise.
 
 ### 2.4 ★★★ Deadlock rule: every `gf_layer_update` needs a full re-assert first
 
@@ -359,7 +403,7 @@ Keys added while getting the Material-style look right — all hot-reloadable, n
 
 | key | meaning |
 |---|---|
-| `panel_alpha` | 0-255 opacity of the panel background. `255` = fully opaque and no alpha plane is allocated (identical to the 1-bit path). Anything less turns on the alpha plane of §2.3.1 |
+| `panel_alpha` | 0-255 opacity of the panel background. `255` = fully opaque and no alpha plane is allocated (identical to the 1-bit path). Anything less turns on the alpha plane of §2.3.1 — **which permanently consumes one of the four alpha planes and disables the OEM parking-distance display for the rest of the ignition cycle. Keep this at 255 in a car. See Trap 3.** |
 | `panel2` | bottom colour of a vertical gradient (`panel` is the top). Set equal to `panel` for a flat Material surface |
 | `shadow_a` | shadow opacity 0-255 |
 | `shadow_dx` / `shadow_dy` | shadow offset. Material-ish is `dx=0`, `dy` a few px |

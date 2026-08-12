@@ -2,16 +2,16 @@
 # 平面纯色 surface(不做渐变) + 大圆角 + elevation 双层投影
 [gauge volume]
 anchor = center
-w = 404
-h = 108
-shadow = 16
+w = 372
+h = 76
+shadow = 0
 shadow_a = 70
 shadow_dx = 0
 shadow_dy = 6
 radius = 20
 panel = 1e232c
 panel2 = 1e232c
-panel_alpha = 240
+panel_alpha = 255
 accent = f2a828
 fg = f4f6fa
 alpha = 248

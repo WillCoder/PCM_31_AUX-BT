@@ -44,6 +44,7 @@ extern int  devctl(int fd, int cmd, void *d, unsigned n, unsigned *i);
 extern void exit(int code);
 extern long lseek(int fd, long o, int w);
 extern int  unlink(const char *p);
+extern int  getpid(void);            /* v29b 单实例锁用 */
 
 #define LM_DEV      "/dev/layermanager"
 #define LM_FLAGS    0x2002
@@ -126,7 +127,27 @@ static gf_dev_t     g_dev=0;
 static gf_display_t g_disp=0;
 static gf_layer_t   g_layer=0;
 static gf_surface_t g_surf=0;
-static unsigned     g_order[8]={0,1,2,3,4,5,6,7};
+/* ★★★★★ v28 根因修复 —— 层序才是真凶。
+ *
+ * 2026-08-05 台架决定性实验(同一探针、同一块层、同一份内容, **只变层序**):
+ *     恒等序 {0,1,..,7}        -> **不显示**
+ *     自己排末尾 {其它.., 自己} -> **显示**
+ * 所以 gf_display_set_layer_order 传的是 **z 序, 数组最后一个在最前面**,
+ * 而它是**显示级**设置 —— 一调就重排【所有】层。
+ *
+ * 这一口气解释了之前所有解释不了的现象:
+ *   · gftest 当初能显示、后来不能 —— 当初层序是引擎设的, 后来被它自己设成恒等序;
+ *   · enable / alpha / "释放" 三轮修复全部无效 —— 它们都不是机制,
+ *     层根本没被"挡住", 是**被排到别人后面去了**;
+ *   · **真车大雷达探测区变黑而车模正常** —— 我们把自己顶到最前面, 原本在最前面
+ *     画探测区的那层被挤到后面被盖住; 车模在另一层, 相对位置没受影响所以完好。
+ *   · 为什么在车上是持久的 —— 我们不只显示时设, go_idle/go_dark 里也设,
+ *     等于引擎只要活着就一直把层序按住。
+ *
+ * 修法: **只在真正显示弹窗时把自己排到最前面, 收起/让出立刻还原成恒等序。**
+ * 还原成恒等序是安全的 —— 台架在恒等序下跑了很久, 原厂界面一直正常(实测, 非假设)。 */
+static unsigned     g_order_front[8]={0,1,2,3,4,5,6,7};  /* 显示时: 自己排末尾 */
+static unsigned     g_order_base [8]={0,1,2,3,4,5,6,7};  /* 空闲时: 还原恒等序 */
 static int          g_detached=0;   /* 1=雷达期间已 detach 隐藏 */
 
 
@@ -135,11 +156,17 @@ static int          g_detached=0;   /* 1=雷达期间已 detach 隐藏 */
  *   · 而且会【一直占着 HW 层5 和 surface 不放】, 只能整机断电才能收回。
  * 现在改成: 记因 -> 反序释放 -> exit(1)。这样失败是可见的, 资源也还给系统。 */
 static void go_dark(void);   /* 前向声明: die() 要先关层 */
+static void go_idle(int claim);  /* v26: 空闲态(1px + 保持 enable); claim=1 才主张记录 */
+static u8  *g_amap;          /* alpha 平面(定义在 blit 段, 这里前置声明给 go_idle 用) */
+/* ★ v29: 初值必须是 1。旧版靠开机那次 go_idle(1) 把它置 1(:492), 取消开机认领后
+ * 就没人置了 —— 第一次 push 会跳过 set_surfaces, 那块层还指着**别人的** surface,
+ * 我们却去设视口/enable = 把原厂内容裁进我们的弹窗矩形, 比现在更糟。 */
+static int  g_rebind = 1;    /* 同上: 定义在 push_layer 段 */
 static void die(const char *why){
     L("ABORT: "); L(why); L("\n");
     /* ⚠ gf_layer_detach 是空操作(不关硬件层)。必须先 go_dark 真关掉, 否则退出后
      * 屏上会永久留一块冻结的弹窗(台架实证)。 */
-    if(g_layer && g_surf) go_dark();
+    if(g_layer && g_surf) go_idle(0);
     if(g_surf)  gf_surface_free(g_surf);
     if(g_layer) gf_layer_detach(g_layer);
     if(g_disp)  gf_display_detach(g_disp);
@@ -169,6 +196,56 @@ static int open_as(int pid){
     j=0; while(b[j]) p[i++]=b[j++]; p[i]=0;
     int fd=open(p,O_RDONLY,0); if(fd<0) fd=open(p,O_RDWR,0);   /* QNX /proc/as 可能要 RDWR; 我们只读 */
     return fd;
+}
+
+/* ★★★ v29b 单实例锁 —— 2026-08-06 真车实测:同时跑起了【两个】引擎。
+ *
+ * 现场证据(diag/05_pop_log.txt): 两份启动日志逐行交织, 各自 purge/pick/建 surface;
+ * 然后后起的那个标定失败 ——
+ *   [watch] d0 L6 与本层 surface 对不上(记录 addr=0x025ddec0 / 期望 0x025a6e80)
+ *           -> 探测器关闭, 退化为纯哑火保护
+ * ⇒ **其中一个引擎全程没有让出保护**, 而且两个同时往同一块共享层写。
+ *
+ * 成因是竞态: debugTools.sh 有个守护循环(引擎一死就重启, 除非 /tmp/pop.stop 在);
+ * 安装器的流程是"建 pop.stop 让旧引擎退出 -> 删 pop.stop -> 自己拉起新引擎"。
+ * 守护每 5 秒查一次, 若正好在"删掉 pop.stop 之后"醒来, 它看到引擎已死且没有停止开关,
+ * 就也拉起一个。
+ *
+ * 只改安装器的时序治标不治本(守护循环、手动启动、看门狗重启都可能撞上),
+ * 所以把闸门放在引擎自己这儿: 谁都可以来启动, 但**第二个必须自己退出**。
+ * 判据不是"锁文件存在"(崩溃会留下死锁文件), 而是**文件里那个 pid 现在还活着吗** ——
+ * 用已有的 open_as() 试开 /proc/<pid>/as, 开得起来才算活。 */
+static int single_instance_guard(void){
+    char b[16]; int n, other=0, i=0, self=getpid();
+    n = slurp("/tmp/pop.pid", b, sizeof(b)-1);
+    if(n > 0){
+        while(i<n && b[i]>='0' && b[i]<='9'){ other = other*10 + (b[i]-'0'); i++; }
+        if(other > 0 && other != self){
+            int fd = open_as(other);
+            if(fd >= 0){                      /* 对方还活着 -> 我们是多余的那个 */
+                close(fd);
+                /* ★ 绝不能用 L() —— 它本进程第一次写时是 O_TRUNC, 会把**存活引擎**
+                 * 已经写好的 [purge]/[pick]/zero-touch/开机快照全部冲掉。
+                 * 2026-08-06 真车实测踩过: 装完 CLEAN_SLATE/ZERO_TOUCH 变 UNKNOWN,
+                 * 而且丢掉了那条最想要的真车开机快照。多余实例只写自己的小文件。 */
+                { int g = open("/tmp/pop.guard", O_WRONLY|O_CREAT|O_TRUNC, 0666);
+                  if(g >= 0){ char m[64]; const char *s="second instance: live engine pid=";
+                              int k=0,z=0,q=other; char t[12];
+                              while(s[z]) m[k++]=s[z++];
+                              if(!q) m[k++]='0'; else { int n2=0; while(q){ t[n2++]=(char)('0'+q%10); q/=10; }
+                                                        while(n2) m[k++]=t[--n2]; }
+                              m[k++]='\n'; write(g,m,(unsigned)k); close(g); } }
+                return 0;
+            }
+            /* 开不起来 = 那个 pid 已经没了, 是崩溃/被杀留下的死锁文件, 继续 */
+            L("[guard] /tmp/pop.pid 里的 pid="); Ld(other); L(" 已不存在, 视为死锁文件\n");
+        }
+    }
+    { int fd = open("/tmp/pop.pid", O_WRONLY|O_CREAT|O_TRUNC, 0666);
+      if(fd >= 0){ char o[12]; int k=0,m=0,q=self; char t[12];
+                   if(!q) o[m++]='0'; else { while(q){ t[k++]=(char)('0'+q%10); q/=10; } while(k) o[m++]=t[--k]; }
+                   o[m++]='\n'; write(fd,o,(unsigned)m); close(fd); } }
+    return 1;
 }
 static int as_rd(u32 va, void *buf, int n){
     if(g_as<0) return -1;
@@ -243,6 +320,51 @@ static volatile u32 *rec_of_hw(int hw){
     return (volatile u32*)(B + SHM_RECBASE + hw*SHM_LSTRIDE);
 }
 
+/* ★ v29h 日志落盘 —— /tmp 是内存盘, **熄火即丢**。
+ * 用户要开一段时间才复现, 中途必然熄火; 等他把 U 盘带回来时, 安装器抢救到的
+ * 只是本次上电后刚 O_TRUNC 出来的新文件 —— 真正的现场早没了(今天已经栽过一次)。
+ * 整份覆盖写(O_TRUNC), 所以文件始终是完整的一份, 不会越滚越大。
+ * 往已挂载文件系统写普通文件无砖险(危险的是 flashit 写裸分区)。 */
+static void persist_log(void){
+    static char pbuf[4096];
+    int fi, fo, n, tot=0;
+    fi = open(LOG_PATH, O_RDONLY, 0); if(fi < 0) return;
+    fo = open("/HBpersistence/overlay/pop_live.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if(fo < 0){ close(fi); return; }
+    while((n = read(fi, pbuf, sizeof(pbuf))) > 0 && tot < 512*1024){
+        write(fo, pbuf, (unsigned)n); tot += n;
+    }
+    close(fi); close(fo);
+}
+
+/* ★ v29g: 把 8 块硬件层的记录全量打一遍。纯读, 零副作用。
+ * 目的(2026-08-07): 我们手上只有"开机之后"的单层快照, 从没见过
+ * **解锁待机、屏幕还黑着**那段时间各层长什么样。要判断"图形到底出来没有",
+ * 就得先知道那两种状态在记录里的差别。启动时打一次、第一次绘制时再打一次,
+ * 一次上车就能把这份对照带回来。 */
+static void dump_layers(const char *tag){
+    int hw;
+    /* ★ v29j: 扫到 12 条, 不是 8。
+     * 反编译 gdcServerCarmine 确认每个 display 有 **12** 条记录(步长 disp*0x5a0 = 12*120):
+     *   idx 0..7  = 硬件层
+     *   idx 8..11 = **LA0..LA3, 四块 alpha 混合平面**
+     * 后四条才是本案的关键仪表: 服务端的归还分支永远执行不到(0x080502ee 的 cmp/hi #3
+     * 与分配值域 8..11 不相交)⇒ **一块平面发出去就到断电都收不回**。
+     * 判据: 我们全程不得让 idx 8..11 里任何一条的 +0(enable)从 0 变 1。
+     * 字段名按库自带 printf 更正: +0 enable / +4 color / +8 **bank**(不是 busy) /
+     *   +12 width / +16 height / +20,+24 addr0,addr1 / +28..+34 window position。 */
+    if(!shm_map()){ L("[layers] "); L(tag); L(": shm 不可用\n"); return; }
+    for(hw=0; hw<12; hw++){
+        volatile u32 *r = rec_of_hw(hw);
+        if(!r) continue;
+        L("[layers] "); L(tag); L(hw<8 ? " hw L" : " ALPHA LA"); Ld(hw<8 ? hw : hw-8);
+        L(" st=");    Lh(r[0]); L(" bpp="); Ld((int)r[1]);
+        L(" busy=");  Ld((int)r[2]);
+        L(" pitch="); Ld((int)r[3]); L(" h=");   Ld((int)r[4]);
+        L(" a0=");    Lh(r[5]);     L(" a1=");   Lh(r[6]); L("\n");
+    }
+}
+
 static volatile u32 *g_rec = 0;      /* 我们那条记录; 0 = 探测器关闭 */
 static u32 g_ref_pitch=0, g_ref_h=0, g_ref_addr=0;   /* 自标定时的基线, 用来比对是否被改 */
 static int g_watch_bad = 0;          /* 连续不符计数 */
@@ -266,6 +388,28 @@ static int g_yield = 0;              /* 1 = 已让出, 不再碰这块层 */
 static int g_idle_ticks = 0;         /* 让出后连续观察到"空闲"的拍数 */
 #define YIELD_RESUME_TICKS 40        /* 50ms/拍 -> 连续空闲 2 秒才恢复(防抖) */
 #define REC_PLACEHOLDER 0x00100000u  /* 记录里的"未使用"占位物理地址 */
+
+/* ★★★ v29 三态: 未认领 / 已认领 / 已让出 ——————————————————————————————
+ *
+ * 由来(2026-08-06, 反汇编真车那份二进制得出, 不是推断):
+ * 车上装的是 **v22**(firmware-cache/usb-builds/overlay_install/coexist_pop 与
+ * coexist_pop_v22.stripped 逐字节相同, cksum 404920996)。v22 的 main 在进主循环前
+ * 无条件调 go_dark(), 而 go_dark 体内是:
+ *     set_surfaces(我们的 surface) -> 视口塌 1×1 -> 写恒等层序 -> **disable** -> update
+ * ⇒ **开机第一秒就把共享硬件层 L6 的 enable 位关成 0, 而且一直关着。**
+ * 原厂 PDC 往这层写内容也点不亮 -> 大雷达全黑, 且与"弹窗有没有弹"无关。
+ * 第二条同样致命: v22 的位移探测器只在**第一次 [draw] 之后**才武装 ->
+ * 开机后没拧过音量的话探测器全程是瞎的 -> **让出协议在真车上根本没上过场**
+ * (这就是"时好时坏"的成因)。
+ *
+ * 根本教训: 我们**读不回**原厂的 surface/视口/层序/enable 原值, 所以任何写入都是
+ * 不可还原的破坏。唯一安全的姿势 = **在真要画之前, 一根手指都不碰。**
+ *
+ * ⚠️ 未证实(别当结论): "911 上 hw L6 就是画大雷达的那层"是从症状反推的, 没实测过。
+ * 但本改动不依赖它 —— "不碰不属于自己的层"在任何层分布下都是对的。 */
+static int g_claimed = 0;            /* 1 = 记录当前是我们的(push 过且没被抢/没释放) */
+static u32 g_boot_rec[7];            /* 开机快照: 该层记录的原值 */
+static int g_boot_ok = 0;
 
 /* 该层是否回到空闲: 要么是占位地址(没人用), 要么还是我们自己的 surface。 */
 static int rec_is_idle(void){
@@ -302,6 +446,45 @@ static void watch_calibrate(u32 paddr, u32 height){
     }
 }
 
+/* ★ v29 开机快照 —— 取代"先认领再标定"。
+ * 我们自己选了哪个 gf 层是已知的, 记录地址 = rec_of_hw(7-GF_LAYER), **不需要先写一次**。
+ * 把开机那一刻的整条记录存下来, 之后"记录是否一字未变"就是"这层有没有人动过"的判据。 */
+static void watch_snapshot(void){
+    int hw = 7 - GF_LAYER, k;
+    volatile u32 *r;
+    if(!shm_map()){ L("[watch] shm 映射失败 -> 认领门永久关闭(绝不 fail-open)\n"); return; }
+    r = rec_of_hw(hw);
+    if(!r){ L("[watch] 取不到记录 -> 认领门永久关闭\n"); return; }
+    for(k=0;k<7;k++) g_boot_rec[k] = r[k];
+    g_rec = r; g_boot_ok = 1;
+    L("[watch] 开机快照 d0 L"); Ld(hw);
+    L(" st=");    Lh(r[0]); L(" bpp="); Ld((int)r[1]);
+    L(" pitch="); Ld((int)r[3]); L(" h="); Ld((int)r[4]);
+    L(" addr=");  Lh(r[5]); L("\n");
+}
+
+/* ★ 认领门: 这块层此刻**在扫谁的内容**?
+ *
+ * ⚠️ 2026-08-06 台架复现踩到的坑: 最初写成"记录 7 个字全等于开机快照才放行"。
+ * 结果拿 probe 在【另一块层】上做一次 gf_display_set_layer_order(显示级调用),
+ * 我们这块层的影子记录也被一起改了(KB 早有实证), 门就此永久关死 ——
+ * 日志 `[hold] 该层已非开机原样 -> 不认领, 不显示`, **弹窗再也不出来**。
+ * 而蓝牙播放页恰恰是显示级调用最频繁的地方 ⇒ 那个判据是颗定时炸弹。
+ *
+ * 正确的问题不是"记录变没变", 而是"这层在扫谁的内存":
+ *   物理地址 == 占位值(0x00100000) -> 没人在用, 可以认领
+ *   物理地址 == 我们自己的 surface  -> 本来就是我们的
+ *   其它                           -> 有人正在用它, 一根手指都不碰
+ * 这正是 rec_is_idle() 的语义。失效方向仍然是【该认领没认领】= 弹窗不出, 绝不伤原厂。 */
+static int may_claim(void){
+    if(g_claimed) return 1;          /* 已经是我们的了 */
+    if(!g_boot_ok) return 0;         /* 没有记录 -> 宁可不显示 */
+    if(rec_is_idle()) return 1;      /* 占位地址 or 我们自己的 */
+    /* 开机快照本身就是空闲的话, 地址没变也算空闲(覆盖 g_ref_addr 还没建立的开机段) */
+    if(g_rec[5] == g_boot_rec[5]) return 1;
+    return 0;
+}
+
 /* 返回 1 = 我们的层被别人改了(格式不再是我们的)。探测器关闭时恒返 0。 */
 /* ★ v19: 不只看字节/像素 —— 真车实测踩了盲区。
  * 真车现象: 拧旋钮时弹窗画出来是【又细又长的噪点带】, 不是规整矩形
@@ -309,7 +492,9 @@ static void watch_calibrate(u32 paddr, u32 height){
  *   字节/像素仍是 2 ⇒ 只查 bpp 的旧版【完全看不见】。
  * shm 记录里本来就有 pitch(+12) / height(+16) / 物理地址(+20), 一并比对。 */
 static int watch_displaced(void){
-    if(!g_rec) return 0;
+    /* ★ v29: 没认领过就谈不上"被位移" —— 此时记录本来就是别人的,
+     * 下面第一条 bpp 判据是**无条件**比常量 2, 不加这道门会在开机第一拍就误判成让出。 */
+    if(!g_rec || !g_claimed) return 0;
     if(g_rec[1] != OUR_BPP)      return 1;   /* 字节/像素被改 */
     if(g_ref_pitch && g_rec[3] != g_ref_pitch) return 2;   /* 行宽被改 -> 会糊成噪点带 */
     if(g_ref_h     && g_rec[4] != g_ref_h)     return 3;   /* 高度被改 */
@@ -352,7 +537,7 @@ static void wd_disarm(void){ alarm(0); }
 static void bail_fire(int sig){
     L("[bail] 收到信号 "); Ld(sig); L(" -> 关层再退出\n");
     alarm(3);
-    if(g_layer) go_dark();
+    if(g_layer) go_idle(0);
     exit(4);
 }
 
@@ -366,10 +551,34 @@ static void bail_fire(int sig){
 static u8  g_alphablk[64];      /* 预备好的 gf_alpha_t */
 static int g_alpha_on = 0;      /* 1 = 走 M1_MAP alpha 平面 */
 
+/* ★ v24: surface/blending 只在【需要时】重绑, 不再每帧都调。
+ *
+ * 真车实测: 拧旋钮时(= 每次值变都重绘 = 每次都 push)**投影区在"半透阴影"和"纯黑"之间稳定闪烁**。
+ * 机制: `gf_layer_set_surfaces` 会把 blending/alpha-map 绑定冲掉, 到下一句 `set_blending`
+ * 补回之间存在一个窗口; 硬件在窗口里找不到 alpha map 就按【全不透明】扫 ——
+ *   · 投影区 = 黑色 + 很低 alpha  -> 变纯黑, 反差极大, 一眼可见
+ *   · 面板区 = 深色 + alpha 240   -> 本来就接近不透明, 几乎看不出
+ *   · 文字/进度条 = alpha 255     -> 毫无变化
+ * 所以现象正是"**只有阴影区闪, 而且拧得越勤闪得越稳定**"。
+ *
+ * 而每帧绑的本来就是同一块 surface —— 绑一次就够。之后只推视口/enable/update,
+ * 这些都置脏位, 不会触发"无脏位 -> 裸 update 死锁"那条。
+ * 需要重绑的时机只有三个: 首次显示、alpha 配置变了、从让出态恢复。 */
+
+
 static void push_layer(int x,int y,int w,int h){
     wd_arm();
     fr_push_enter();
-    gf_layer_set_surfaces(g_layer,&g_surf,1);
+    /* 两者分开处理, 因为它们的性质不同:
+     *   set_surfaces —— 会冲掉 blending 绑定, 所以【只在必须时】调(制造窗口的就是它);
+     *   set_blending —— 不冲掉任何东西, 幂等, 所以【每帧都调】。
+     * 每帧重申 blending 的意义: 万一是**原厂**那边碰了显示状态把我们的 alpha-map 冲掉
+     * (v15 时代实测过别的 gf 客户端能做到这件事), 我们下一帧就自动补回来 ——
+     * 而位移探测器查的是 bpp/pitch/高度/地址, 它对"绑定丢了"这件事是瞎的。 */
+    if(g_rebind){
+        gf_layer_set_surfaces(g_layer,&g_surf,1);
+        g_rebind = 0;
+    }
     if(g_alpha_on) gf_layer_set_blending(g_layer,(gf_alpha_t*)g_alphablk);
     gf_layer_set_src_viewport(g_layer, 0, 0, w-1, h-1);
     /* ★ v20 更正: 宽和高【都是 x2-x1+1】。
@@ -378,7 +587,7 @@ static void push_layer(int x,int y,int w,int h){
      * 2026-08-04 用 pcmshot 抓"显示帧-隐藏帧"差分实测: 变化区外接框
      * x 214..585(宽 372, 正好) / y 202..278(高 **77**, 多 1) —— 宽对高错, 铁证。 */
     gf_layer_set_dst_viewport(g_layer, x, y, x+w-1, y+h-1);
-    gf_display_set_layer_order(g_disp, g_order, 0);
+    gf_display_set_layer_order(g_disp, g_order_front, 0);   /* 显示期间才排到最前 */
     gf_layer_enable(g_layer);
     gf_layer_update(g_layer, 0);
     fr_push_exit();
@@ -399,17 +608,98 @@ static void push_layer(int x,int y,int w,int h){
  * v16/v17 的真车黑块正是因为 detach 后 enable 仍=1, 全零 surface 被按 32bpp 扫成不透明黑。
  *
  * 塌几何到 1×1 是纵深防御: 万一 disable 在某条路径上没提交, 误扫面积上限 1 像素。 */
+/* ★★ v26 空闲态 = go_idle() —— 缩成 1 像素, 但【永不关灯】。
+ *
+ * 2026-08-05 台架决定性实验(contend 探针, 刻意不调 enable, 忠实模拟原厂):
+ *   引擎持有 gf1 且处于 go_dark(disable) 态时, 竞争者持续写记录, 屏上**什么都不出现**,
+ *   使能位一直是 0 —— 完整复现了真车"大雷达探测区全黑而车模正常"。
+ *
+ * 结论: 真正的病根不是"让出得不够彻底", 而是**我们一开始就不该关掉这块层**。
+ * 用户的原则说得更准: "如果系统在用这个图层, 我们就直接释放, 优先系统使用。"
+ * 最彻底的实现其实比"检测到再让出"更简单 —— **永远不关灯**:
+ *   · 系统随时能用它, 灯一直亮着, 它写完记录内容立刻就出来;
+ *   · 我们根本没有"需要让出"的时刻, 也就不依赖探测器是否武装;
+ *   · 最坏情况的垃圾从"整个面板黑块"降到"角落 1 个像素"(而且那个像素写成全透明)。
+ *
+ * 保留 go_dark()(真 disable)只给一个用途: 清理【前任实例】留下的层(purge),
+ * 那时记录带着我们自己的签名, 确定不是系统在用。 */
+/* claim 语义(这个区分很要紧):
+ *   claim=1 —— 启动时用。此刻没人在用这块层, 我们主张它(set_surfaces), 记录才会指向
+ *              我们的 surface, 位移探测器也才有得标定。
+ *   claim=0 —— 收起/退出时用。**绝不 set_surfaces** —— 万一系统已经接管了记录,
+ *              再 set_surfaces 就是把它抢回来, 正好违背"优先系统使用"。 */
+/* ★★★ v27 补上最后一块: **空闲时必须解绑 alpha 混合**。
+ *
+ * 2026-08-05 台架实证(v26 仍然复现失败): 记录已经是竞争者的(引擎读到它的 pitch/h)、
+ * 使能位也是 1(灯亮着), 竞争者画的东西**依然完全不显示**。
+ * 唯一还能让像素消失的就是 alpha —— 我们给这层绑了 M1_MAP, alpha 平面指向**我们自己的**
+ * 那块内存, 而空闲时它被我们清成全 0。**绑定不会随我们停手而消失**,
+ * 于是别人画什么都被乘以 alpha=0 -> 全透明 -> 屏上什么都没有。
+ *
+ * 这正好解释真车那张照片: **PDC 探测区整片不见, 而车模完好**(车模在别的层上)。
+ *
+ * ⇒ "释放"必须包括**释放混合配置**, 不只是 surface 和 enable 位。
+ * mode=0 也在驱动的 9 值白名单内, 就是"不混合"。重新显示时 push_layer 每帧都会重绑, 不受影响。 */
+static void clear_blending(void){
+    static u8 zb[64]; int q;
+    /* ★★★ v29k: 从没绑过 alpha 就【一次都不要调】。
+     *
+     * 本函数的用途是"解绑我们自己的 M1_MAP"。panel_alpha=255 时 g_alpha_on 恒 0,
+     * 我们从来没建过平面、没绑过混合 —— 这里没有任何东西需要解。
+     * 而它偏偏是 255 配置下**唯一残留的 gf_layer_set_blending 调用点**
+     * (收起 / 让出 / 退出三条路各一处), 每次弹窗收起都会打一发。
+     *
+     * gdcServerCarmine 的 set_gf_layer_blend_mode(0x080500d8) 会向 LA0..LA3 申请一块
+     * 混合平面, 而释放分支(0x080502ee)的守卫是 `cmp/hi #3`, 与分配值域 8..11 不相交
+     * ⇒ 发出去就到断电为止收不回。"全零结构体一定不会走到分配"是**推断, 没实测**
+     * (2026-08-11 拿 /gdc_shm_inform idx 8..11 当仪表, 故意用 240 证伪, 仪表毫无反应
+     *  ⇒ 那条观测路径作废, 分配与否目前**测不出来**)。
+     *
+     * 测不出来的时候, 正确做法是**不去赌**: 直接不调。
+     * 代价 = 0(没绑过的东西不需要解绑), 收益 = 255 配置下对服务端的混合调用降到零。 */
+    if(!g_alpha_on) return;
+    for(q=0;q<(int)sizeof(zb);q++) zb[q]=0;      /* mode=0 = 不混合 */
+    gf_layer_set_blending(g_layer,(gf_alpha_t*)zb);
+}
+
+static void go_idle(int claim){
+    /* ★★ v29: 从未认领过 -> 一根手指都不碰。
+     * 这一道门同时管住四个调用点: die() / bail_fire() / pop.stop 退出 / 保持到期收起。
+     * 旧版这四处无条件执行, 意味着"开机后没拧过音量就退出/被杀"也会往共享层写一遍。
+     * claim=1 的用法在 v29 已经没有了(开机不再认领), 保留形参只为不动函数签名。 */
+    if(!claim && !g_claimed) return;
+    wd_arm();
+    fr_push_enter();
+    if(claim) gf_layer_set_surfaces(g_layer,&g_surf,1);
+    clear_blending();               /* ★ 解绑我们的 alpha 平面, 别人才画得出东西 */
+    g_rebind = 1;                   /* 下次显示要重绑 surface + blending */
+    /* 把左上角那一个像素写成全透明, 万一混合配置被谁重置, 它也只是 1 px */
+    if(g_surf){ static u8 zi[128];
+        if(gf_surface_get_info(g_surf,(gf_surface_info_t*)zi)){
+            gf_surface_info_t *z=(gf_surface_info_t*)zi;
+            if(z->vaddr) *(u16*)(size_t)z->vaddr = 0x0000u; } }
+    if(g_amap) g_amap[0] = 0;
+    gf_layer_set_src_viewport(g_layer, 0, 0, 0, 0);
+    gf_layer_set_dst_viewport(g_layer, 0, 0, 0, 0);   /* 1x1(宽高都是 x2-x1+1) */
+    gf_display_set_layer_order(g_disp, g_order_base, 0);  /* ★ 还原层序, 别按着原厂 */
+    gf_layer_enable(g_layer);       /* 保持点亮 */
+    gf_layer_update (g_layer, 0);
+    fr_push_exit();
+    wd_disarm();
+}
+
 static void go_dark(void){
     wd_arm();
     fr_push_enter();
     gf_layer_set_surfaces(g_layer,&g_surf,1);
     gf_layer_set_src_viewport(g_layer, 0, 0, 0, 0);
-    gf_layer_set_dst_viewport(g_layer, 0, 0, 0, 0);   /* 1x1(宽高都是 x2-x1+1) */
-    gf_display_set_layer_order(g_disp, g_order, 0);
+    gf_layer_set_dst_viewport(g_layer, 0, 0, 0, 0);   /* 1x1 */
+    gf_display_set_layer_order(g_disp, g_order_base, 0);  /* 还原层序 */
     gf_layer_disable(g_layer);      /* 置脏位 */
     gf_layer_update (g_layer, 0);   /* 提交 -> 硬件 enable 位清零 */
     fr_push_exit();
     wd_disarm();
+    g_rebind = 1;                   /* 这里自己调了 set_surfaces -> 下次显示必须重绑 */
 }
 
 /* ★★ v20 残留清除 —— 用户硬要求:"v15 的问题一定要清掉"。
@@ -427,8 +717,9 @@ static void go_dark(void){
 static void layer_kill(gf_layer_t lyr){   /* 形参别叫 L —— L() 是日志函数 */
     wd_arm();
     gf_layer_set_src_viewport(lyr, 0, 0, 0, 0);
-    gf_layer_set_dst_viewport(lyr, 0, 0, 0, 1);
-    gf_display_set_layer_order(g_disp, g_order, 0);
+    gf_layer_set_dst_viewport(lyr, 0, 0, 0, 0);
+    /* 清前任残留也用恒等序 —— 绝不趁机把全局层序按成我们的 */
+    gf_display_set_layer_order(g_disp, g_order_base, 0);
     gf_layer_disable(lyr);
     gf_layer_update (lyr, 0);
     wd_disarm();
@@ -459,6 +750,12 @@ static int pick_layer(gf_display_t disp, gf_layer_t *out){
     for(i=0;i<GF_NCAND;i++){
         int gfl = GF_CAND[i], hw = 7 - gfl;
         volatile u32 *r = rec_of_hw(hw);
+        /* ★ v29i: 把判据的三项都打出来 —— 只看结论("选中/跳过")无法判断
+         * 到底是"这层真空闲"还是"它是原厂层、只是还没拿到缓冲"。 */
+        if(r){ L("[pick] gf"); Ld(gfl); L(" (硬件L"); Ld(hw); L(") pitch="); Ld((int)r[3]);
+               L(" h="); Ld((int)r[4]); L(" addr="); Lh(r[5]);
+               L((r[3]==800&&r[4]==480) ? " [形状=原厂800x480]" : " [形状非原厂]");
+               L(((r[5]&0x0fffffffu)==0x00100000u) ? " [无缓冲]\n" : " [有缓冲]\n"); }
         if(r && r[3]==800 && r[4]==480 && (r[5]&0x0fffffffu)!=0x00100000u){
             L("[pick] gf"); Ld(gfl); L(" 当前是原厂 800x480 面, 跳过\n");
             continue;
@@ -473,6 +770,28 @@ static int pick_layer(gf_display_t disp, gf_layer_t *out){
         return 1;
     }
     return 0;
+}
+
+/* ★★ v25 真释放 —— 把层【还给】系统, 而不是"拿着但不碰"。
+ *
+ * v21~v24 的让出是"停手": 不再 enable/disable/update/set_surfaces。听起来够了, 实际不够 ——
+ * **我们是把灯关着走开的**。哑火(收起弹窗)时 go_dark 会 disable 那块硬件层;
+ * 之后系统要用它, 我们检测到、停手, 但那层仍停在【我们关掉】的状态,
+ * 系统把内容写进去也点不亮 -> 2026-08-05 真车现象: **大雷达探测区全黑, 而车模正常**
+ * (车模在别的层上)。用户原话:"如果系统在用这个图层, 我们就直接释放, 优先系统使用。"
+ *
+ * 所以释放必须【包含把 enable 位还回去】。这里有一点逻辑上很干净:
+ * 触发让出的判据就是"这条记录已经不是我们的了" —— 也就是说这一刻记录里已经是**系统的**
+ * surface/几何, 所以 enable 点亮的是他们的画面, 不会是我们的残留。
+ *
+ * 只调 enable+update, **不调 set_surfaces / 不动视口** —— 那些都是共享状态, 现在归他们。 */
+static void release_layer(void){
+    wd_arm();
+    fr_push_enter();
+    gf_layer_enable(g_layer);       /* 把 enable 位还回去(记录已是系统的) */
+    gf_layer_update(g_layer, 0);    /* 提交 */
+    fr_push_exit();
+    wd_disarm();
 }
 
 static u8 g_scan[SCAN_CHUNK];
@@ -498,6 +817,12 @@ static void locate(void){
     L("[V4] V="); Lh(g_V); L(" P="); Lh(g_P); L(" P2="); Lh(g_P2); L(" BF="); Lh(g_bf); L("\n");
 }
 static int g_why=-1;   /* 上次丢弃原因: 0=正常 1=提示音src 2=ok!=2; 只在变化时记日志 */
+
+/* ★★ v29g: V4 proxy 数据是否有效(ok==2)。
+ * 这就是"音频子系统真的起来了"的信号 —— 而让屏幕在解锁待机期黑着的,
+ * 和让这里 ok!=2 的, 是同一件事(系统还没真正进运行态)。
+ * 用途见主循环: 无效期间**只播种、绝不绘制**, 从根上消掉"点火自己弹一下"。 */
+static int g_v4ok=0;
 /* g_readok: 本次是否成功读到了 proxy 数据(不管有没有被 src 过滤)。
  * 必须把"读不到"(链断了, 该重定位)和"读到了但被过滤"(倒车提示音, 一切正常)分开 ——
  * 否则一挂倒挡, 10 秒后就会去全堆扫 3.57MB, 纯属浪费还可能卡顿。 */
@@ -526,7 +851,7 @@ static int revalidate_V(void){
 /* 返回 0..40, 或 -1 表示读不到 */
 static int read_vol(void){
     int v4=-1,v2=-1;
-    g_readok=0;
+    g_readok=0; g_v4ok=0;
     if(g_P){ u32 ok=0; u8 b=0;
         int okr = (rd_u32(g_P+V4_OK,&ok)==0 && ok==2);
         int bor = (rd_u8(g_P+V4_VOL,&b)==0 && b<=VOL_MAX);
@@ -540,6 +865,13 @@ static int read_vol(void){
         } else if(g_why!=2){ g_why=2;
             L("[V4] 丢弃: ok="); Ld((int)ok); L(" (!=2 表示该 proxy 数据无效)\n"); } }
     if(g_P2){ u8 b=0; if(rd_u8(g_P2+V2_VOL,&b)==0 && b<=VOL_MAX){ v2=(int)b; g_readok=1; } }
+    /* ★★ v29h: 标志的含义是【本拍的值是谁给的】, 不是"proxy 有没有效"。
+     * 上一版写成 okr&&bor 就置 1 —— 错。因为紧接着 src∈{34,35}(提示音)会把 v4 置 -1,
+     * 于是下面 return 落到 **V2 兜底**, 而标志已经是 1 了 ⇒ 来源明明切了, 门却看不见。
+     * 审查给出的致命时序: 点火那拍若正在放开机提示音, 翻转被一个 V2 读数消耗掉;
+     * 提示音一结束值切回 V4, 标志不翻转 -> 照样弹 -> 认领 hw L6 -> 雷达继续黑。
+     * 改成按实际返回值判定后, V4<->V2 每一次切换(含提示音进/出两个方向)都必然触发重播种。 */
+    g_v4ok = (v4 >= 0);
     return v4>=0? v4 : v2;      /* V4 为准, V2 兜底 */
 }
 
@@ -631,7 +963,6 @@ static int read_override(void){
  * 开关: ui.def 的 `panel_alpha`(0..255)。==255 -> 不建平面、不开混合, 行为与 v19 完全一致
  * (逐像素二值透明, 默认模式下 A=0 本来就真透)。<255 -> 建平面 + M1_MAP。 */
 static gf_surface_t g_asurf = 0;
-static u8  *g_amap = 0;
 static int  g_astride = 0;
 static int  g_panel_a = 255;     /* 由 ui.def panel_alpha 覆盖 */
 
@@ -668,7 +999,15 @@ static void blit_layer(UIWidget *w, u16 *dst, int pitch){
 }
 
 int main(void){
-    L("COEXIST_POP v20 — 迁到gf1(硬件L6,原厂不碰)+运行时选层+清前任残留+信号兜底+alpha平面半透软边\n");
+    /* ★ 横幅必须带**唯一的 ASCII 版本串** —— 安装器 run.sh 只能是纯 ASCII(生成器按 ascii 写盘),
+     * 没法 grep 中文日志行。装车时"新版真进去了 / 老版真没了"这个保证就靠这一行的 v29/v2x 判据。
+     * 以前一直没改横幅(v22~v28 全打印 v20), 结果脚本层面根本区分不了版本。 */
+    /* ★★ 单实例锁必须是 main 的【第一句】—— 要在任何 L() 之前。
+     * L() 本进程首次写用 O_TRUNC, 多余实例只要打一行横幅就会把存活引擎的日志冲掉
+     * (2026-08-06 真车实测: 因此丢了开机快照, CLEAN_SLATE/ZERO_TOUCH 变 UNKNOWN)。 */
+    if(!single_instance_guard()) return 0;
+
+    L("COEXIST_POP v29k — 开机零接触+认领门+让出不写层序+alpha混合调用归零\n");
 
     /* 0. layermanager 握手(跑通的代码都是这个顺序; 少了它 gf_dev_attach 会阻塞) */
     int lmfd=open(LM_DEV, LM_FLAGS, 0);
@@ -684,6 +1023,20 @@ int main(void){
     if(_sr2!=GF_ERR_OK){ die("display_attach"); }
     gf_display_info_t *di=(gf_display_info_t*)dispinfo;
     L("display "); Ld((int)di->xres); L("x"); Ld((int)di->yres); L(" nlayers="); Ld((int)di->nlayers); L("\n");
+
+    /* ★★★ v29i: 在【碰任何层之前】先把 8 层记录全打一遍。
+     *
+     * 2026-08-07 用户确认的现象: 解锁后 PCM 已完整启动(点火时不再显示盾徽), 此时触发雷达
+     * 探测区是黑的; 解锁后马上点火则一切正常。而真车开机快照是
+     *     hw L6  pitch=800  h=480  addr=0x00100000(占位)
+     * —— pitch/h **是原厂的形状**(我们是 512×220), 只是还没分配缓冲。
+     * 而 pick_layer 的跳过判据要求 pitch/h/地址**三条同时**成立, 地址是占位就不跳过
+     * ⇒ **我们把一块"原厂的、只是还没拿到缓冲"的层拿走了**。
+     * 这可能才是主因, 而"弹窗自己闪一下"只是"引擎起得早"的伴随现象。
+     *
+     * 之前的 dump("boot") 打在 attach + surface_create **之后**, 拍到的已经被我们动过。
+     * 这一份是真正的动手前状态 —— 长间隔/短间隔各跑一次, 一对照就能定案。 */
+    dump_layers("prepick");
 
     /* ★ v20 2a. 先清前任残留(v15/v18/v19 崩溃或被 kill 后留在屏上的层), 再选层。
      * 顺序不能反: 万一前任占的正好是我们要选的那块, 得先关掉。 */
@@ -735,12 +1088,25 @@ int main(void){
     signal(SIGTERM, bail_fire); signal(SIGINT,  bail_fire);
     signal(SIGHUP,  bail_fire); signal(SIGQUIT, bail_fire);
     signal(SIGSEGV, bail_fire); signal(SIGBUS,  bail_fire);
-    /* ★ 启动即哑火 —— 台架实证(2026-08-03): gdc【不会】在客户端死亡时关掉层!
-     * 强杀引擎后 enable 位持续为 1(弹窗永久冻结在屏上), 新起的实例也不会自动清。
-     * 所以每次启动必须先把层真正关掉: 既清掉前一个实例崩溃/被杀/看门狗退出留下的残留,
-     * 也保证我们从正确的哑火态开始。这条是"看门狗+自启=自愈"能成立的前提。 */
-    go_dark();
-    L("[init] 启动即哑火(清前实例残留)\n");
+    /* ★★★ v29: 开机【绝不认领】。
+     *
+     * 旧版在这里调 go_idle(1)/go_dark() —— set_surfaces + 塌 1×1 + 写层序 + enable/disable。
+     * 那是**不可还原的共享状态写入**: 我们读不回原厂的 surface/视口/层序/enable 原值,
+     * 一旦写下去就再也还不回去。真车实证的后果见 :288 那段注释。
+     *
+     * 前任残留怎么办? 已经由 purge_stale_layers() 处理了(它在选层之前跑, 判据是
+     * "记录高度==220 且 bpp==2" = 只认我们自己的形状, 绝不误碰原厂层)。这里不需要再关一次。
+     *
+     * 探测器怎么武装? 见下面的 watch_snapshot() —— 直接按 7−GF_LAYER 定位记录并存快照,
+     * 根本不需要"先写一次让记录变成我们的"。v26 那条"必须在这里武装"的要求依然满足,
+     * 而且比旧法更早、更干净。 */
+    /* ASCII 标签 zero-touch 是给安装器 grep 的(run.sh 只能纯 ASCII) */
+    L("[init] v29k zero-touch noblend: 开机未认领任何层\n");
+    watch_snapshot();
+    /* ★ v29g: 启动时(=解锁待机、屏幕还黑着)把 8 层记录全打一遍。
+     * 这是我们第一次能拿到"黑屏待机态"的层分布 —— 和第一次绘制时那份对照,
+     * 就能知道"图形出来没有"在记录里长什么样, 将来要不要加第二道门有据可依。 */
+    dump_layers("boot");
     fr_open();
     fr_mark('B');
 
@@ -751,8 +1117,9 @@ int main(void){
     static UIWidget W;
     unsigned last_def_hash=0; int last_val=-99999; int have=0;
     { int k,w2=0,no=(int)di->nlayers; if(no<1||no>8) no=8;
-      for(k=0;k<no;k++) if(k!=GF_LAYER) g_order[w2++]=(unsigned)k;
-      if(w2<8) g_order[w2++]=(unsigned)GF_LAYER; }
+      for(k=0;k<no;k++) if(k!=GF_LAYER) g_order_front[w2++]=(unsigned)k;
+      if(w2<8) g_order_front[w2++]=(unsigned)GF_LAYER;
+      for(;w2<8;w2++) g_order_front[w2]=(unsigned)w2; }
 
     int t=0, shown=0, hold_left=0, last_push=-99, cooldown=0;
     int hold_ticks = 28;                 /* 50ms/tick -> 1.4s, 之后按 def 的 hold 覆盖 */
@@ -800,14 +1167,29 @@ int main(void){
                                     for(q=0;q<(int)sizeof(g_alphablk);q++) g_alphablk[q]=0;
                                     alp->mode=0x00080102u;      /* M1_MAP|SRC_M1|DST_1mM1, 在驱动白名单内 */
                                     alp->map=g_asurf; alp->m1=255; alp->m2=255;
-                                    g_alpha_on=1;               /* -> push_layer 每次重申 */
-                                    wd_arm(); gf_layer_set_blending(g_layer,alp); wd_disarm();
+                                    g_alpha_on=1; g_rebind=1;   /* 配置变了 -> 下次 push 重绑 */
+                                    /* ★★★ v29e: 这里【绝对不能】调 gf_layer_set_blending。
+                                     *
+                                     * 2026-08-06 真车实证(用户全程没碰音量旋钮, 雷达照样黑):
+                                     * 这一句在【第一次加载 ui.def】时执行 = 主循环第 0 拍 = **开机**,
+                                     * 与有没有绘制无关。它把我们那块【上一行刚 memset 成全 0】的
+                                     * alpha 平面绑成了这块**共享硬件层**的混合源。
+                                     * 原厂照常在这层画 PDC 探测区(所以几何完全正确), 但硬件合成走
+                                     * 我们的 alpha 映射 -> 颜色被乘没 -> **填成黑色**。
+                                     * 用户照片: 两块肾形探测区形状完好、纯黑填充 —— 逐条吻合。
+                                     *
+                                     * 它也是 v29"开机零接触"唯一的漏洞: 认领/视口/enable/层序都管住了,
+                                     * 只剩这一个 gf 写调用不需要拧旋钮就会跑。
+                                     * 冗余性: push_layer(:525) 每帧都会 `if(g_alpha_on) set_blending`,
+                                     * 所以真正要显示时绑定一定建得起来, 这里一句纯属多余。 */
                                 }
                             } else if(g_amap){
                                 int q; gf_alpha_t *alp=(gf_alpha_t*)g_alphablk;
                                 for(q=0;q<(int)sizeof(g_alphablk);q++) g_alphablk[q]=0;  /* mode=0 也在白名单 */
-                                g_alpha_on=0;
-                                wd_arm(); gf_layer_set_blending(g_layer,alp); wd_disarm();
+                                g_alpha_on=0; g_rebind=1;
+                                /* ★ v29e 同理: 只有【我们确实认领着这层】时才有资格去解绑。
+                                 * 没认领就调 = 往原厂正在用的层上写混合配置(和上面那处一个性质)。 */
+                                if(g_claimed){ wd_arm(); gf_layer_set_blending(g_layer,alp); wd_disarm(); }
                                 g_amap=0;
                                 L("[alpha] 已复位为不混合\n");
                             }
@@ -824,7 +1206,7 @@ int main(void){
           if(sf>=0){ close(sf);
             /* v22: 同"收起"路径 —— 必须【先关层再清缓冲】, 否则退出瞬间闪一个黑框
              * (清 RGB 时层还开着, 而 alpha 平面还是面板形状 -> 扫出黑色面板框)。*/
-            go_dark();                      /* 真关 enable 位 */
+            go_idle(0);                     /* v26: 缩 1px 但不关灯, 也不抢记录 */
             { int yy,xx, ch=W.h+2, cw=W.w+2;
               if(ch>UI_MAXH) ch=UI_MAXH;
               if(cw>pitch)   cw=pitch;
@@ -839,7 +1221,68 @@ int main(void){
 
         /* --- 取值: 手动覆盖优先, 否则活体去抖值 --- */
         int val = read_override();
+        int from_override = (val >= 0);          /* /tmp/uival = 人为显式指定, 不受下面的抑制规则约束 */
         if(val < 0) val = vol_tick(shown);
+
+        /* ★★★ v29f: 只放行【像人拧的】变化 —— 系统自发的跳变一律只重播种, 不弹窗。
+         *
+         * 2026-08-07 用户实测的复现条件(这条是他发现的, 我没想到):
+         *   钥匙解锁 -> PCM 上电开始跑(屏还黑着) -> 隔几分钟才点火
+         *   -> **没碰旋钮, 点火瞬间弹窗自己闪一下** -> 之后开车雷达就黑
+         *   解锁后马上点火则完全正常。
+         * 机制: 音量是我们每 50ms 去 PCM3Root 内存里【轮询】出来的, 不是事件。
+         *   待机期先播种(如 20), 点火时音频子系统初始化把音量恢复成实际值 -> 值变了
+         *   -> 主循环那句 `val != last_val` 不管是谁改的, 当场 push_layer -> **认领 hw L6**。
+         *   间隔短则引擎还没读到第一个值(开机脚本要等图形栈+8s), 播种播的就是最终值 -> 不弹。
+         * 后果: 那一次认领把我们的 surface/alpha映射/1×1视口留在 L6 上,
+         *   之后原厂画 PDC 探测区 -> 几何是它的、合成走我们的 -> **填成纯黑**(用户照片)。
+         * ⇒ **不是"进程在跑"会坏, 是"画过一次"就坏。** 这也反过来证实了
+         *   "911 上 hw L6 与 PDC 显示绑在一起"这条此前一直没验证的前提。
+         *
+         * ---- 修法 (v29g 待机门) ----
+         *
+         * 判据不看数值, 看**读数来自哪个来源** —— 所以不存在"两边数值刚好接近就漏判"。
+         * read_vol() 有两个来源: V4(主, 要 ok==2)和 V2(兜底, 无有效性判据)。
+         * 解锁待机、屏幕还黑着那段时间 V4 无效, 我们吃的是 V2;
+         * 点火后 V4 变有效, 读数**从 V2 切到 V4** —— 两个不同对象里的两个数字,
+         * 没有理由相等 ⇒ 主循环那句 `val != last_val` 当场判成"用户拧了旋钮"并弹窗。
+         * 那一弹就认领了 hw L6, 之后原厂的 PDC 探测区就黑了。
+         *
+         * 规则:
+         *   · V4 未就绪期间 —— 持续跟随读数, 但**一次都不画**(黑屏时画了也没人看见, 纯有害)
+         *   · 就绪/失效**切换的那一刻** —— 重新播种(可能要等几拍才拿到有效值, 用 need_reseed 兜住)
+         *   · 之后 V4 一直有效、值再变, 那才是真的有人拧旋钮 -> 正常弹
+         * /tmp/uival 手动通道不受此门约束(人为显式指定)。 */
+        { static int prev_ok = -1; static int need_reseed = 0;
+          if(!from_override){
+              if(g_v4ok != prev_ok){
+                  L(g_v4ok ? "[src] 取值来源=V4 -> 重新播种, 之后正常响应旋钮\n"
+                           : "[src] 取值来源=V2兜底 -> 只播种, 不弹窗\n");
+                  dump_layers("flip");   /* 来源翻转那一拍的全层记录 —— 门生效时 firstdraw 永远不会出现 */
+                  prev_ok = g_v4ok; need_reseed = 1;
+              }
+              if(!g_v4ok && val >= 0) last_val = val;          /* 未就绪: 跟随但永不弹 */
+              if(need_reseed && val >= 0){ last_val = val; need_reseed = 0; fr_mark('s'); }
+          } }
+
+        /* ★★ v29h 心跳(10s 一条) —— 这道门押在"待机期 V4 不出值"这个**从未观测到**的前提上。
+         * 两种坏结局在现象上无法区分, 必须靠日志分开:
+         *   · 前提不成立(待机期 V4 就出值)-> 门形同虚设, 照样弹, 雷达照黑
+         *   · V4 在 9x1 上根本不出值      -> g_v4ok 恒 0 -> 一次都不画 = **弹窗永久失效**
+         * 把判定所需的全部状态摊开, 回来一眼能定案。 */
+        if((t % 200) == 0){
+            u32 ok=0, sr=0, ra=0; u8 b4=0, b2=0;
+            if(g_P){ rd_u32(g_P+V4_OK,&ok); rd_u32(g_P+V4_SRC,(u32*)&sr); rd_u8(g_P+V4_VOL,&b4); }
+            if(g_P2){ rd_u8(g_P2+V2_VOL,&b2); }
+            if(g_rec) ra = g_rec[5];
+            L("[hb] t=");     Ld(t);
+            L(" P=");         Lh(g_P);       L(" ok=");    Ld((int)ok);   L(" src=");  Ld((int)sr);
+            L(" v4=");        Ld((int)b4);   L(" v2=");    Ld((int)b2);   L(" srcv4="); Ld(g_v4ok);
+            L(" val=");       Ld(val);       L(" last=");  Ld(last_val);
+            L(" shown=");     Ld(shown);     L(" claim="); Ld(g_claimed); L(" yield="); Ld(g_yield);
+            L(" L6a=");       Lh(ra);        L("\n");
+            persist_log();                  /* 顺带落盘, 10s 一次 */
+        }
 
         fr_sample(shown);      /* 无条件采样: 读数冻结时也要留痕, 否则完全静默拍不到 */
 
@@ -864,11 +1307,23 @@ int main(void){
         if(!g_yield && have && val>=0 && last_val==-99999){
             last_val = val;               /* 首个有效值只播种, 开机/热重载不弹窗 */
             L("[seed] val="); Ld(val); L("\n"); fr_mark('S');
+        } else if(!g_yield && have && val>=0 && val!=last_val && (t-last_push)>=2 && cooldown<=0
+                  && !may_claim()){
+            /* ★ v29 认领门: 这块层自开机以来被人动过 -> 原厂正在用它 -> 本次不画。
+             * 宁可不显示弹窗, 也绝不往别人的层上写。 */
+            last_val = val;                              /* 吃掉这个值, 不弹 */
+            { static int nag=0; if(!nag){ nag=1;
+                L("[hold] 该层已非开机原样(原厂在用) -> 不认领, 不显示\n"); fr_mark('H'); } }
         } else if(!g_yield && have && val>=0 && val!=last_val && (t-last_push)>=2 && cooldown<=0){
             last_val=val; last_push=t;
             ui_render(&W, val);
             blit_layer(&W,(u16*)(size_t)si->vaddr,pitch);
+            /* ★ v29g: 在【认领之前】打一次全层记录 —— 与 boot 那份对照, 就能看出
+             * "屏幕已经在显示东西"时各层什么样。必须在 push_layer 之前, 否则拍到的是我们自己。 */
+            if(!g_claimed) dump_layers("firstdraw");
             push_layer(W.x,W.y,W.w,W.h);
+            /* ★ v29: 到这一刻记录才真正变成我们的 —— 标定基线在此建立(不是开机时) */
+            if(!g_claimed){ g_claimed=1; watch_calibrate((u32)si->paddr,(u32)si->h); }
             shown=1; hold_left=hold_ticks;
             L("[draw] val="); Ld(val); L("\n"); fr_mark('D');
             /* ★ v19 画后立验: 真车是【画出来那一下就是噪点】, 等下一拍已经来不及。
@@ -881,13 +1336,20 @@ int main(void){
                   L(" h="); Ld((int)g_rec[4]); L(" (基线 pitch="); Ld((int)g_ref_pitch);
                   L(" h="); Ld((int)g_ref_h); L(") -> 当场哑火\n");
                   fr_mark('W');
-                  shown=0; hold_left=0;                  /* 只改自己的状态, 不碰这块层 */
+                  shown=0; hold_left=0;
                   g_yield=1; g_idle_ticks=0; g_watch_bad=0;
+                  wd_arm();
+                  clear_blending();
+                  wd_disarm();                 /* v29: 不再写层序(见下方让出分支同款注释) */
+                  g_rebind = 1;
+                  release_layer();
+                  g_claimed = 0;               /* ★ v29 */
                   L("[yield] 原厂要用这块层 -> 立刻停手, 之后不再触碰(等它空闲再恢复)\n");
               } }
-            /* v18: 首次成功 push 之后自标定位移探测器(记录此刻才被服务端写入) */
+            /* v26: 自标定已提前到启动处(见 [init] 附近的长注释) —— 这里不再重复。
+             * 万一启动时没标定成功(shm 打不开等), 补一次机会, 但只补一次。 */
             { static int calib=0;
-              if(!calib){ calib=1; watch_calibrate((u32)si->paddr, (u32)si->h); } }
+              if(!calib && !g_rec){ calib=1; watch_calibrate((u32)si->paddr, (u32)si->h); } }
         }
 
         /* ★ v20 像素导出钩子 —— 免去"让用户拍照"这一步。
@@ -943,6 +1405,16 @@ int main(void){
                          * 我们只要【立刻停手】, 就绝不可能是它变黑的原因。 */
                         shown=0; hold_left=0; g_watch_bad=0;
                         g_yield=1; g_idle_ticks=0;
+                        /* ★ 释放 = 解绑混合 + 交还 enable。若是在"显示中"被抢的,
+                         * 此刻 alpha 平面还绑着, 不解绑就会把对方画的一切乘成全透明。
+                         * ★ v29: 层序不再还原 —— 写恒等层序本身就是一次共享显示状态覆盖,
+                         *   而记录此刻已经是原厂的了, 我们没有任何理由再动全局 z 序。 */
+                        wd_arm();
+                        clear_blending();
+                        wd_disarm();
+                        g_rebind = 1;
+                        release_layer();
+                        g_claimed = 0;          /* ★ v29: 已交还, 之后一根手指都不碰 */
                     }
                 } else g_watch_bad=0;
             } else {
@@ -950,7 +1422,12 @@ int main(void){
                 if(rec_is_idle()){
                     if(++g_idle_ticks >= YIELD_RESUME_TICKS){
                         g_yield=0; g_idle_ticks=0; last_val=-99999; cooldown=0;
-                        L("[yield] 这块层已空闲 -> 恢复接管\n");
+                        g_rebind=1;              /* 原厂用过这块层 -> 我们的绑定肯定没了 */
+                        /* ★ v29: 认领门比的是"开机快照", 而原厂用过之后记录已经不是开机那份了。
+                         * 既然这一刻判定为空闲(没人用), 就把它当作新的基线 —— 否则
+                         * may_claim() 永远为假, 让出一次之后就再也不显示了。 */
+                        { int k; for(k=0;k<7;k++) g_boot_rec[k]=g_rec[k]; g_boot_ok=1; }
+                        L("[yield] 这块层已空闲 -> 刷新基线, 恢复接管\n");
                         fr_mark('R');
                     }
                 } else g_idle_ticks=0;
@@ -960,6 +1437,25 @@ int main(void){
 
         /* --- 保持到期 -> 收起 --- */
         if(shown && !g_yield){
+            /* ★★ v29c: 保持期【每拍重申混合配置】。
+             *
+             * 2026-08-06 真车现象: 弹窗的**阴影区变成纯黑框在闪**, 而且**只在蓝牙播放页**。
+             * 机制: 阴影的 RGB 本来就接近黑, 全靠 alpha 平面(M1_MAP)才显示成半透;
+             * 一旦绑定被冲掉, 硬件就把它按**不透明**扫出来 = 一个黑框。
+             * 为什么偏偏蓝牙页: 那是动态页(进度条/封面在刷), 原厂频繁做显示级调用,
+             * 而"别的 gf 客户端做一次显示级调用就会重置我们这层的格式/混合配置"是已实证的。
+             * 静态页原厂不刷, 所以看不见。
+             *
+             * 旧代码只在 push_layer 里重申(=只有值变化那一拍), 保持期整段裸奔。
+             * set_blending 按本文件 :517 的实证是**幂等且不冲掉任何东西**, 每拍调是安全的;
+             * 必须跟一次 update 才会落到硬件(:439 实证: 只登记不提交是不生效的)。
+             * 只在【我们正显示、且没让出】时做 —— 不显示时一根手指都不碰(v29 的底线)。 */
+            /* ★ v29j 删除: 原本这里每拍重申一次 set_blending(v29c 为治阴影黑框加的)。
+             * 两个理由都没了:
+             *   ① 阴影已经去掉, 那个故障不存在了;
+             *   ② 反编译坐实 set_blending 会向 gdcServerCarmine 申请一块 **alpha 混合平面**,
+             *      而服务端的归还分支(0x080502ee, cmp/hi #3)与分配值域(8..11)不相交 ->
+             *      **发出去就永远收不回**。每拍申请一次是往枪口上撞。 */
             if(hold_left>0) hold_left--;
             else {
                 /* ★ v22 顺序修正 —— 真车实测"弹窗消失瞬间闪一个黑框"就是这里。
@@ -969,8 +1465,8 @@ int main(void){
                  * (这段清像素是 1bit alpha 时代的遗留 —— 那时"隐藏"就是把像素变透明;
                  *  现在隐藏靠 disable, 它不但多余, 还正好制造了这一闪。)
                  * 正确顺序: **先关层, 再清缓冲** —— 纵深防御保留, 闪烁消失。 */
-                go_dark();
-                shown=0; L("[dark]\n"); fr_mark('h');
+                go_idle(0);
+                shown=0; L("[idle]\n"); fr_mark('h');
                 { int yy,xx, ch=W.h+2, cw=W.w+2;
                   if(ch>UI_MAXH) ch=UI_MAXH;
                   if(cw>pitch)   cw=pitch;
@@ -994,11 +1490,16 @@ int main(void){
          * 所以对策 = 显示期间够快地重申, 把被外部翻转到自愈的窗口压到最短。
          * ⚠ v12 删掉重申是错的(当时误判 lm 拉锯): 删了变成一直花。
          * ⚠ 不能到 50ms —— 会打满单线程 gdc 服务端(REPLY 死锁)。250ms 是安全上限附近。 */
-        /* 显示期间每 250ms(5拍)完整重申一次 —— 完整 push_layer(set_surfaces+update)才能
-         * 把正确 LnEC 刷到硬件。台架实证: 只 set_surfaces 不 update 修不了(不提交到扫描寄存器)。
-         * 外部翻转后最多 250ms 自愈。不能更快: 完整 push 太密会 REPLY-block gdc。 */
-        /* 让出期间绝不重申 —— 那会把原厂刚写进去的记录又抢回来 */
-        if(shown && !g_yield && (t%5)==0) push_layer(W.x,W.y,W.w,W.h);
+        /* ★ v23: 【周期性重申已删除】。
+         *
+         * 它是 v15"抢回来"时代的产物 —— 那时的策略是被别人翻了格式就每 250ms 重申一次夺回来。
+         * v21 起策略换成了【检测到就让出】, 两者互斥: 位移会走让出分支, 根本轮不到重申去修。
+         * 留着它唯一的实际效果是**制造闪烁**:
+         *   `push_layer` 第一步 `gf_layer_set_surfaces` 会把 blending/alpha-map 绑定冲掉,
+         *   随后虽然立刻 `set_blending` 补回, 但中间存在一个窗口; 硬件在这个窗口里找不到
+         *   alpha map 就按【不透明】扫 —— 于是**投影区在"半透阴影"和"纯黑"之间每 250ms 闪一次**
+         *   (真车实测现象)。
+         * 稳态本来就不需要重申: 画一次提交一次, 之后没人动就一直对。 */
         usleep(50000);          /* 20Hz 轮询 */
     }
     return 0;

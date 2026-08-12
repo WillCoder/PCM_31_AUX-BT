@@ -254,7 +254,18 @@ static void ui_render(UIWidget *w, int value){
     /* ★ v20: 投影改成【四边对称】。旧写法 px=sh,py=0,pw=W-sh,ph=H-sh 只在左边和下边留白,
      * 面板整体偏右上, 屏上看就是"下面和左下漏一条浅带"(用户实拍到的那个)。
      * 现在四边各留 sh; sh=0 时与旧行为完全一致。 */
-    int sh=w->shadow, px=sh, py=sh, pw=W-2*sh, ph=H-2*sh;
+    /* ★ v29d 边距按【每边实际需要】算, 不再四边都 sh。
+     * 旧写法 px=py=sh, pw=W-2sh, ph=H-2sh 没算 shadow_dx/dy 的偏移:
+     * ui.def 的 sh=16 / dy=6 时, 底部要 16+6=22 才放得下, 但只留了 16 ->
+     * 绘制跑到 y=py+ph+sr+oy=114 超出 H=108, ui_px 在 y>=ui_H 处**静默丢弃** ->
+     * 下缘不是渐隐而是**一条直角硬边**(2026-08-06 用 Mac 预览器渲出来实锤, 逐像素量过:
+     * 下缘 165->173->181->189 被切断, 上缘几乎没有阴影)。
+     * 现在: 偏移往哪边, 哪边就多留 |偏移| —— 投影完整落在盒子里, 四边都能渐隐到 0。 */
+    int sh=w->shadow;
+    int odx = w->shadow_dx, ody = w->shadow_dy;
+    int ml = sh + (odx<0 ? -odx : 0), mr = sh + (odx>0 ? odx : 0);
+    int mt = sh + (ody<0 ? -ody : 0), mb = sh + (ody>0 ? ody : 0);
+    int px=ml, py=mt, pw=W-ml-mr, ph=H-mt-mb;
     if(pw<8||ph<8){ px=0; py=0; pw=W; ph=H; sh=0; }     /* 参数离谱 -> 退回无投影 */
     ui_cur_a = 255;                                     /* 投影: 靠 cov 表达浓淡 */
     if(sh>0) ui_shadow(px,py,pw,ph,w->radius,sh,w->shadow_dx,w->shadow_dy,
