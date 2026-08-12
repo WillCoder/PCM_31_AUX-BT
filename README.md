@@ -1,4 +1,4 @@
-# PCM_31_AUX-BT
+# porsche-pcm31-mods
 
 **Porsche PCM3.1 — two shipped modifications, and the toolkit that produced them**
 

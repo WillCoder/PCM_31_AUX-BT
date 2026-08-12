@@ -1,4 +1,7 @@
-# PCM_31_AUX-BT — Porsche PCM3.1 Bluetooth Audio Fix, The Full Journey
+# Bluetooth fix — locked at boot, and it makes sound
+
+> Porsche PCM3.1 head unit (CHN/MOPF variant, bench unit). QNX 6.3.x + SH-4A (SuperH, little-endian).
+> This document records **an entire chain of real pain I lived through**, not a single bug. It starts from the most annoying everyday symptom, digs all the way down to SH4 disassembly and memory injection, and ends in one clean firmware — with two bricked bench units paid as tuition along the way.
 
 | Part | What you will find there |
 |---|---|
@@ -6,9 +9,6 @@
 | [Part II — The solution](#part-ii--the-solution) | fmguard, the child-vtable shotgun, the self-derived `main`, the clean firmware, the real car |
 | [Part III — Problems and dead ends](#part-iii--problems-and-dead-ends) | The journey in chronological order: symptoms, every dead end, the traps, the lessons |
 | [Appendix](#appendix) | Key addresses, key files, acknowledgments |
-
-> Porsche PCM3.1 head unit (CHN/MOPF variant, bench unit). QNX 6.3.x + SH-4A (SuperH, little-endian).
-> This document records **an entire chain of real pain I lived through**, not a single bug. It starts from the most annoying everyday symptom, digs all the way down to SH4 disassembly and memory injection, and ends in one clean firmware — with two bricked bench units paid as tuition along the way.
 
 ![Live working bench: booted to FM, K-CUT serial (green LED) + USB + MacBook](images/01-bench-working-fm.jpg)
 *The live working bench: PCM3.1 booted and running FM; bottom-right is a K-CUT USB-to-serial adapter (green LED on); the red/black/green jumpers are the 57600 serial line; the MacBook shows this project's task list.*
