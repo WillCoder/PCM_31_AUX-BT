@@ -1,9 +1,9 @@
 # porsche-pcm31-mods
 
-**Porsche PCM3.1 — two shipped modifications, and the toolkit that produced them**
+**Porsche PCM3.1 — two shipped modifications, one bench capability, and the toolkit that produced them**
 
 > Porsche PCM3.1 (CHN) · QNX 6.3.x · SH-4A · 2026-08
-> **✅ Both features are running on a real car (911/9x1), not just on the bench.**
+> **✅ Features 1 and 2 are running on a real car (911/9x1), not just on the bench.**
 >
 > **English** · [简体中文](README.zh-CN.md)
 
@@ -15,18 +15,19 @@
 
 ## What's in here
 
-Two features, and the tooling both of them are built on.
+Three features, and the tooling they are built on.
 
 | | What it does | Ships as | Status |
 |---|---|---|---|
 | **1 · [Bluetooth fix](bluetooth-fix.md)** | Bluetooth stays selected across a cold start — **and it makes sound**, with nothing to press | **IFS1 flash** | ✅ bench + real car |
 | **2 · [Volume OSD](volume-osd.md)** | Our own popup drawn on an independent hardware layer, over the untouched stock UI | runtime app, **no flash** | ✅ bench + real car |
+| **3 · [USB Ethernet](usb-ethernet.md)** | A network cable onto the bench, using an AX88772B the firmware whitelist rejects | driver loaded from the HDD, **no flash write** | ✅ bench |
 | Bench serial toolchain | 57600 root-shell dev loop — push a binary, run it, pull the log, kill it; no USB stick, no reflash | dev tooling | ✅ |
 | RE + build pipeline | Reliable SH4 disassembly, `sh4emu` interpreter, IFS inflate/patch/deflate, pre-flash preflight gate | dev tooling | ✅ |
 
 **How something ships is the first thing to know about it.** A flash patch can brick the unit and is the only way to change stock code ([why](#why-it-ships-as-a-flash)); a runtime app cannot brick anything and disappears on reboot.
 
-Both feature documents are organised the same way, so you read either one the same way:
+All three feature documents are organised the same way, so you read any one of them the same way:
 
 | | |
 |---|---|
@@ -121,9 +122,70 @@ The traps live next to the recipes they break, because that is where you need th
 
 ---
 
+# Feature 3 · USB Ethernet — a card the whitelist rejects, made to work
+
+📄 Full document: **[usb-ethernet.md](usb-ethernet.md)** · [简体中文](usb-ethernet.zh-CN.md)
+
+The bench's only debug channel is a **57600-baud serial console**. The firmware is already
+set up for the alternative — `inetd.conf` runs ftp and telnet as root — but binding a USB
+ethernet card needs an **exact VID/PID match against four entries**, and the card on the
+bench is an AX88772B (`0b95:772b`), which is not one of them. The 2026-07 verdict was "buy
+a card that natively matches; don't chew on the 772B", and it stood for six weeks.
+
+**The end state, on the bench**: `en0` up at 192.168.0.90, link negotiated, over that same
+rejected card.
+
+## How it works
+
+- **Two independent failures were stacked**, and the outer one hid the inner one completely.
+- **The outer one** — `mount -Tio-net devn-asix.so` does not print an error, it takes
+  `io-net` down with a **SIGSEGV**, three attempts, the same faulting `ip` every time. The
+  cause has nothing to do with the card: `devn-asix.so` declares only `libc.so.2` in its
+  `DT_NEEDED` while importing the whole USB DDK symbol set (`udi_attach`, `udi_io`,
+  `udi_enumerate`, …). It never had to declare them — the stock load path brings the DDK
+  along — so loading it any other way sends the first call through an unresolved symbol,
+  into nowhere.
+- **The inner one** — with the DDK supplied, the driver initialises and then refuses at the
+  business layer: `unable to init dll devn-asix: No such device`. That is the driver's own
+  chip table, a **second whitelist** inside the module, and it has no `0b95:772b` either.
+- **The control group is what separates them.** Mounting the *unmodified* driver and
+  watching it crash identically costs one minute and is the whole trick — patch the PID
+  table first and it crashes exactly the same, so a correct fix looks like a failed one.
+
+## The solution
+
+Two one-line fixes, one per problem, and **nothing is written to flash** — the patched
+driver is an ordinary file on the HDD, loaded into a second `io-net` instance you started
+and can kill.
+
+- **`LD_PRELOAD=/lib/libusbdi.so.2`** brings the DDK into a second instance (`-i1`,
+  `/dev/io-net1`), leaving whatever is already running alone.
+- **One byte in the chip table** — at file offset `0x107e8`, PID `0x772a` → `0x772b`,
+  retargeting the AX88772**A** record so the 772B inherits its flags and chip marker rather
+  than needing a new record.
+
+| | Location |
+|---|---|
+| **The patch generator** | [`code/usb-ethernet/patch_asix_pid.py`](code/usb-ethernet/patch_asix_pid.py) — finds the chip table by signature (no hardcoded offset), guards on the old value, prints every changed byte |
+| On-device byte editor | [`code/usb-ethernet/fx.c`](code/usb-ethernet/fx.c) — read/write a file's bytes with an old-value guard, so a one-byte experiment costs no USB round trip |
+| Driver binary | **not included** — proprietary Porsche firmware; extract `devn-asix.so` from your own dump and feed it to the generator |
+
+> 🚨 **The bench has one USB port.** The network card and the USB stick cannot be plugged in
+> at the same time, so the patched driver must be on `/mnt/data` (the HDD, persistent)
+> **before** you swap the stick for the card.
+
+## Problems and dead ends
+
+Five of them, including the one that mattered: going straight for the PID table, which
+produces an identically crashing driver and the wrong conclusion.
+**[→ Part III of usb-ethernet.md](usb-ethernet.md)** has them all, plus what a `DT_NEEDED`
+entry does and does not tell you.
+
+---
+
 # Shared tooling
 
-Neither feature would exist without these, and both are built on them.
+None of the three would exist without these, and all of them are built on them.
 
 ## Bench serial toolchain
 
@@ -146,9 +208,11 @@ The 57600 root-shell development loop — push a binary, run it, pull the log, k
 README.md / README.zh-CN.md        this index
 bluetooth-fix.md   (+ .zh-CN.md)   feature 1, full document
 volume-osd.md      (+ .zh-CN.md)   feature 2, full document
+usb-ethernet.md    (+ .zh-CN.md)   feature 3, full document
 code/
   bluetooth-fix/                   caves, their offline validator, USB autorun flasher
   volume-osd/                      overlay engine, renderer, ui.def, screenshot verify
+  usb-ethernet/                    ASIX driver PID-table patcher, on-device byte editor
   common/                          sh4emu, IFS pipeline, serial toolchain, on-device C tools
 images/                            bench photos and screenshots
 ```

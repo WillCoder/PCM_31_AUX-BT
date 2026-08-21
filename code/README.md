@@ -6,6 +6,7 @@ feature, and everything either of them could use in `common/`.
 ```
 bluetooth-fix/   feature 1 — the caves, their offline validator, the USB autorun flasher
 volume-osd/      feature 2 — the overlay engine, renderer, ui.def, screenshot verify
+usb-ethernet/    feature 3 — the ASIX driver PID-table patcher, on-device byte editor
 common/          shared — sh4emu, the IFS pipeline, the serial toolchain, on-device C tools
 ```
 
@@ -46,6 +47,19 @@ Contains `coexist_pop.c` (engine), `ui_core.c` (renderer + `ui.def` parser), `ui
 
 **Read [`volume-osd/README.md`](volume-osd/README.md) first** — the traps there each cost a day,
 and one of them (`panel_alpha` must be 255) costs the driver their parking sensors.
+
+## `usb-ethernet/` — USB 网卡(白名单外的 AX88772B)
+
+A network cable onto the bench instead of the 57600 serial line — **no flash write**, the
+patched driver is a file on the HDD loaded into a second `io-net` instance.
+Full write-up: [`../usb-ethernet.md`](../usb-ethernet.md) ([简体中文](../usb-ethernet.zh-CN.md)).
+
+- **`patch_asix_pid.py`** — builds the patched `devn-asix.so` from your own stock copy: finds the chip table by signature (no hardcoded offset), guards on the old value, prints every byte it changed and the `fx` command to undo it.
+- `fx.c` — on-device file byte reader/writer with an old-value guard. Build it with `common/sh4tools/start_stack.S`; it takes arguments.
+
+**Read [`usb-ethernet/README.md`](usb-ethernet/README.md) first** — the top trap is that
+mounting the driver by hand crashes for a reason that has nothing to do with the PID table,
+so patching the table first looks like a failed patch.
 
 ## `common/` — shared tooling 共用工具
 

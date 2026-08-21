@@ -17,6 +17,21 @@ cd "$(dirname "$0")/.."
 SRC="${1:-coexist-app/mvp/coexist_vol.c}"
 OUT="${2:-coexist-app/mvp/coexist_vol}"
 
+
+# ── 启动桩必须匹配 main 的签名(2026-08-20 踩过) ─────────────────────────────
+#   dev/sh4tools/_start.S 直接假设「ldqnx 已置 r4=argc, r5=argv」并原样传给 main,
+#   实测**不成立**: vfbprobe 传 3 / 传 30, main 看到的都是默认值(argc<=1)。
+#   ⇒ 用 _start.S 编出来的东西, 命令行参数**静默失效**。当时差点据此误报"只画了 3 帧"。
+#   dev/sh4tools/start_stack.S 才是 SH4 SysV 正确约定(argc 在 @r15, argv 在 r15+4),
+#   和已验证的 tools/sh4-xbuild/crt.S 逐指令相同。
+#   修法: 按 main 的签名自动选 —— main(void) 保持 _start.S(studio 走这条, 字节/ck 不变)。
+if sed -e 's://.*::' -e 's:/\*[^*]*\*/::g' "$SRC" | grep -qE 'int[[:space:]]+main[[:space:]]*\([[:space:]]*(int|void[[:space:]]*\*)'; then
+  START=dev/sh4tools/start_stack.S
+  echo "[build] main 带参 -> 用 start_stack.S(栈约定), 命令行参数可用"
+else
+  START=dev/sh4tools/_start.S
+fi
+
 docker run --rm -v "$PWD:/work" sh4build:latest sh -c "
   cd /work
   sh4-linux-gnu-gcc -O2 -shared -nostdlib -fPIC -Wl,-soname,libc.so.2        dev/sh4tools/stub_libc.c  -o /tmp/libc.so.2
@@ -26,7 +41,7 @@ docker run --rm -v "$PWD:/work" sh4build:latest sh -c "
   sh4-linux-gnu-gcc -O2 -shared -nostdlib -fPIC -Wl,-soname,libecpp-ne.so.4  dev/sh4tools/stub_ecpp.c  -o /tmp/libecpp-ne.so.4
   sh4-linux-gnu-gcc -O2 -Wall -nostdlib \
     -Wl,--dynamic-linker=/usr/lib/ldqnx.so.2 \
-    dev/sh4tools/_start.S '$SRC' \
+    $START '$SRC' \
     -Wl,--no-as-needed /tmp/libc.so.2 /tmp/libm.so.2 /tmp/libz.so /tmp/libecpp-ne.so.4 /tmp/libgdcApiCarmine.so \
     -lgcc \
     -o '$OUT'

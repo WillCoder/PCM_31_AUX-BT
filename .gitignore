@@ -18,3 +18,6 @@
 *.as
 PCM3Root*
 PCM3_IFS*
+# stock or patched OEM drivers/libraries — source only in this repo
+*.so
+devn-*
